@@ -15,6 +15,9 @@ use serde_json::{json, Value};
 use tacitus_core::memory::recall::RecallArgs;
 use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
+use tacitus_core::vault::{
+    get_note, graph_query, search_notes, NoteFormat, Relation, SearchArgs, VaultIndex,
+};
 
 #[derive(Clone)]
 struct TacitusServer {
@@ -53,6 +56,27 @@ struct ForgetArgs {
     memory_id: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct SearchToolArgs {
+    query: String,
+    token_budget: Option<usize>,
+    top_k: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GetNoteArgs {
+    note_id: String,
+    format: Option<String>,
+    max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GraphArgs {
+    from: String,
+    relation: String,
+    depth: Option<usize>,
+}
+
 fn ok(data: Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(
         json!({ "ok": true, "data": data }).to_string(),
@@ -65,6 +89,10 @@ fn err(code: &str, reason: impl Into<String>, suggestion: &str) -> CallToolResul
         "error": { "code": code, "reason": reason.into(), "suggestion": suggestion }
     });
     CallToolResult::error(vec![ContentBlock::text(payload.to_string())])
+}
+
+fn build_index(vault: &std::path::Path) -> Result<VaultIndex, CallToolResult> {
+    VaultIndex::build(vault).map_err(|e| err("INTERNAL", e.to_string(), "Check the vault path."))
 }
 
 #[tool_router(server_handler)]
@@ -135,6 +163,98 @@ impl TacitusServer {
             Ok(removed) => ok(json!({ "removed": removed })),
             Err(e) => err("INTERNAL", e.to_string(), "Check the vault path."),
         }
+    }
+
+    #[tool(
+        description = "Search vault notes by relevance; ranked snippets within an optional token_budget (never whole notes). Expand with get_note."
+    )]
+    async fn search(&self, Parameters(args): Parameters<SearchToolArgs>) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let hits = search_notes(
+            &index,
+            &args.query,
+            &SearchArgs {
+                token_budget: args.token_budget,
+                top_k: args.top_k,
+            },
+        );
+        let hits: Vec<Value> = hits
+            .iter()
+            .map(|h| {
+                json!({ "note_id": h.note_id, "title": h.title, "score": h.score, "snippet": h.snippet, "token_count": h.token_count })
+            })
+            .collect();
+        ok(json!({ "hits": hits }))
+    }
+
+    #[tool(
+        description = "Fetch a note progressively: outline | frontmatter_only | full, with an optional max_tokens ceiling."
+    )]
+    async fn get_note(&self, Parameters(args): Parameters<GetNoteArgs>) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let (format, format_str) = match args.format.as_deref() {
+            Some("frontmatter_only") => (NoteFormat::FrontmatterOnly, "frontmatter_only"),
+            Some("full") => (NoteFormat::Full, "full"),
+            _ => (NoteFormat::Outline, "outline"),
+        };
+        match get_note(&index, &args.note_id, format, args.max_tokens) {
+            Ok(r) => ok(
+                json!({ "note_id": r.note_id, "title": r.title, "format": format_str, "content": r.content, "token_count": r.token_count, "truncated": r.truncated }),
+            ),
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
+    }
+
+    #[tool(
+        description = "Traverse the wikilink graph: links (outgoing) | backlinks | neighbors (both directions, to depth)."
+    )]
+    async fn graph_query(&self, Parameters(args): Parameters<GraphArgs>) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let relation = match args.relation.as_str() {
+            "links" => Relation::Links,
+            "backlinks" => Relation::Backlinks,
+            "neighbors" => Relation::Neighbors,
+            other => {
+                return err(
+                    "INVALID_INPUT",
+                    format!("relation must be links|backlinks|neighbors (got {other:?})."),
+                    "Use a valid relation.",
+                )
+            }
+        };
+        match graph_query(&index, &args.from, relation, args.depth.unwrap_or(1)) {
+            Ok(nodes) => {
+                let nodes: Vec<Value> = nodes
+                    .iter()
+                    .map(|n| json!({ "note_id": n.note_id, "title": n.title }))
+                    .collect();
+                ok(json!({ "from": args.from, "relation": args.relation, "nodes": nodes }))
+            }
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
+    }
+
+    #[tool(description = "List all note ids with their titles and paths.")]
+    async fn list_notes(&self) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let notes: Vec<Value> = index
+            .all()
+            .iter()
+            .map(|n| json!({ "note_id": n.id, "title": n.title, "path": n.path }))
+            .collect();
+        ok(json!({ "notes": notes }))
     }
 }
 
