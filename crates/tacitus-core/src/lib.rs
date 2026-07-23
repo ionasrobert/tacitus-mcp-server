@@ -9,3 +9,4 @@ pub mod ids;
 pub mod lexical;
 pub mod memory;
 pub mod tokens;
+pub mod vault;
