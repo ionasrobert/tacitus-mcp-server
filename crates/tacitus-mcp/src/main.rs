@@ -27,6 +27,7 @@ use tacitus_core::vault::{
 #[derive(Clone)]
 struct TacitusServer {
     vault: PathBuf,
+    scope: PermissionScope,
     /// Shared across tool calls so a `propose_changes` change_id survives until
     /// a later `commit_changes` (the pending changeset lives in the writer).
     writer: Arc<Mutex<NoteWriter>>,
@@ -468,6 +469,25 @@ impl TacitusServer {
             Err(e) => err(&e.code, e.reason, &e.suggestion),
         }
     }
+
+    #[tool(description = "List available tools and the current permission scope.")]
+    async fn capabilities(&self) -> CallToolResult {
+        // Introspect the live router so the list never drifts from the tools
+        // actually registered (mirrors the TS capabilities tool, which lists
+        // itself too).
+        let tools: Vec<Value> = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| json!({ "name": t.name, "description": t.description }))
+            .collect();
+        let scope = serde_json::to_value(self.scope).unwrap_or(Value::Null);
+        ok(json!({
+            "server": "tacitus-memory",
+            "version": "0.1.0",
+            "tools": tools,
+            "permissions": { "scope": scope },
+        }))
+    }
 }
 
 #[tokio::main]
@@ -488,7 +508,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scope
     );
     let writer = Arc::new(Mutex::new(NoteWriter::new(&vault, scope)));
-    let service = TacitusServer { vault, writer }.serve(stdio()).await?;
+    let service = TacitusServer {
+        vault,
+        scope,
+        writer,
+    }
+    .serve(stdio())
+    .await?;
     service.waiting().await?;
     Ok(())
 }
