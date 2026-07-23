@@ -1,3 +1,5 @@
+pub mod embed;
+pub mod embed_cache;
 pub mod get;
 pub mod graph;
 pub mod index;
@@ -6,11 +8,13 @@ pub mod search;
 pub mod types;
 pub mod write;
 
+pub use embed::{cosine, Embedder, HashingEmbedder};
+pub use embed_cache::CachedEmbedder;
 pub use get::{get_note, GetNoteResult, NoteFormat};
 pub use graph::{graph_query, GraphNode, Relation};
 pub use index::VaultIndex;
 pub use parse::parse_note;
-pub use search::{search_notes, SearchArgs, SearchHit};
+pub use search::{search_notes, SearchArgs, SearchHit, SearchMode};
 pub use types::{Heading, Note, WikiLink};
 pub use write::{
     AuditEntry, ChangeOp, Changeset, CommitResult, DiffEntry, NoteWriter, PermissionScope,
@@ -53,12 +57,13 @@ mod tests {
     fn search_finds_relevant_notes_within_budget() {
         let dir = make_vault();
         let index = VaultIndex::build(&dir).unwrap();
-        let hits = search_notes(&index, "launch deadline", &SearchArgs::default());
+        let embedder = HashingEmbedder::new();
+        let hits = search_notes(&index, "launch deadline", &SearchArgs::default(), &embedder);
         assert!(hits.iter().any(|h| h.note_id == "ideas"));
-        let scores: Vec<u32> = hits.iter().map(|h| h.score).collect();
+        let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
         assert_eq!(scores, {
             let mut s = scores.clone();
-            s.sort_by_key(|x| std::cmp::Reverse(*x));
+            s.sort_by(|a, b| b.partial_cmp(a).unwrap());
             s
         });
         for h in &hits {

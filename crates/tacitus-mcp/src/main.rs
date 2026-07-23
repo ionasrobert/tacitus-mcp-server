@@ -20,8 +20,8 @@ use tacitus_core::memory::recall::RecallArgs;
 use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
 use tacitus_core::vault::{
-    get_note, graph_query, search_notes, ChangeOp, Changeset, NoteFormat, NoteWriter,
-    PermissionScope, Relation, SearchArgs, VaultIndex,
+    get_note, graph_query, search_notes, ChangeOp, Changeset, HashingEmbedder, NoteFormat,
+    NoteWriter, PermissionScope, Relation, SearchArgs, SearchMode, VaultIndex,
 };
 
 #[derive(Clone)]
@@ -67,6 +67,7 @@ struct ForgetArgs {
 #[derive(Deserialize, JsonSchema)]
 struct SearchToolArgs {
     query: String,
+    mode: Option<String>,
     token_budget: Option<usize>,
     top_k: Option<usize>,
 }
@@ -266,20 +267,30 @@ impl TacitusServer {
     }
 
     #[tool(
-        description = "Search vault notes by relevance; ranked snippets within an optional token_budget (never whole notes). Expand with get_note."
+        description = "Search vault notes by relevance; ranked snippets within an optional token_budget (never whole notes). mode: hybrid (default) | lexical | semantic. Expand with get_note."
     )]
     async fn search(&self, Parameters(args): Parameters<SearchToolArgs>) -> CallToolResult {
         let index = match build_index(&self.vault) {
             Ok(i) => i,
             Err(r) => return r,
         };
+        let mode = match args.mode.as_deref() {
+            Some("lexical") => SearchMode::Lexical,
+            Some("semantic") => SearchMode::Semantic,
+            _ => SearchMode::Hybrid,
+        };
+        // Default offline embedder. A cached/neural embedder drops in here
+        // behind the same Embedder trait when configured.
+        let embedder = HashingEmbedder::new();
         let hits = search_notes(
             &index,
             &args.query,
             &SearchArgs {
+                mode,
                 token_budget: args.token_budget,
                 top_k: args.top_k,
             },
+            &embedder,
         );
         let hits: Vec<Value> = hits
             .iter()
