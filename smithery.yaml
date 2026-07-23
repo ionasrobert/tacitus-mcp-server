@@ -1,0 +1,16 @@
+# Smithery configuration — https://smithery.ai/docs
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      vaultPath:
+        type: string
+        title: Vault path
+        description: Path to the folder Tacitus should use as the vault
+        default: "."
+  commandFunction: |-
+    (config) => ({
+      command: "npx",
+      args: ["-y", "@dashiro/tacitus-mcp-server", config.vaultPath || "."]
+    })

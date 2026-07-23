@@ -1,0 +1,42 @@
+{
+  "name": "tacitus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tacitus \u2014 agent-native PKM. Memory-as-a-Service MCP server for AI agents.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "eval": "tsx packages/mcp-server/src/eval/run.ts",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@types/node": "^22.8.0",
+    "eslint": "^9.13.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.11.0",
+    "prettier": "^3.3.3",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.11.0",
+    "vitest": "^2.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ionasrobert/tacitus-mcp-server.git"
+  },
+  "homepage": "https://github.com/ionasrobert/tacitus-mcp-server#readme",
+  "bugs": "https://github.com/ionasrobert/tacitus-mcp-server/issues",
+  "author": "Robert Ionas"
+}
