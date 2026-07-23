@@ -1,6 +1,7 @@
 {
   "name": "@dashiro/tacitus-mcp-server",
-  "version": "0.1.0",
+  "mcpName": "io.github.ionasrobert/tacitus-mcp-server",
+  "version": "0.1.1",
   "description": "Tacitus Memory \u2014 an MCP server giving AI agents long-term memory with provenance, token budgeting, and conflict detection.",
   "type": "module",
   "license": "MIT",
