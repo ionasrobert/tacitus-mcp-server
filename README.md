@@ -89,15 +89,24 @@ your-vault/
 
 ## Development
 
-Monorepo (npm workspaces). The server lives in `packages/mcp-server`.
+Polyglot monorepo. The reference server (shipped on npm) is TypeScript in
+`packages/mcp-server`. A Rust engine in `crates/tacitus-core` is being ported for
+an eventual single-binary, zero-runtime-deps build — its `stable_id` matches the
+TS engine byte-for-byte, so memory ids are identical across both.
 
 ```bash
+# TypeScript server
 npm ci
 npm test          # vitest
 npm run typecheck
 npm run lint
 npm run build     # tsup → packages/mcp-server/dist
 npm run eval      # retrieval quality report
+
+# Rust engine
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
 ## License

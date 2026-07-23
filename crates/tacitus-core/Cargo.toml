@@ -1,0 +1,12 @@
+[package]
+name = "tacitus-core"
+description = "Core engine for Tacitus — agent memory, retrieval, and write-back."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+chrono.workspace = true

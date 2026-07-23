@@ -8,3 +8,6 @@ coverage/
 
 # never commit npm auth
 .npmrc
+
+# Rust
+/target
