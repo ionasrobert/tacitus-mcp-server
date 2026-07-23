@@ -2,11 +2,13 @@ pub mod conflict;
 pub mod rank;
 pub mod recall;
 pub mod remember;
+pub mod store;
 pub mod types;
 
 pub use conflict::{detect_conflicts, Conflict};
 pub use recall::{recall, RecallArgs, RecallItem, RecallResult};
 pub use remember::{remember, ProvenanceInput, RememberInput};
+pub use store::MemoryStore;
 pub use types::{Author, Memory, MemoryType, Provenance};
 
 #[cfg(test)]

@@ -10,5 +10,6 @@ repository = "https://github.com/ionasrobert/tacitus-mcp-server"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
