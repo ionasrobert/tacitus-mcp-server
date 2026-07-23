@@ -6,5 +6,6 @@
 
 pub mod error;
 pub mod ids;
+pub mod lexical;
 pub mod memory;
 pub mod tokens;
