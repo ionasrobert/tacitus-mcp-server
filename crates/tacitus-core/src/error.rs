@@ -26,3 +26,15 @@ impl fmt::Display for TacitusError {
 }
 
 impl std::error::Error for TacitusError {}
+
+/// Filesystem failures surface as a structured, actionable error too — an agent
+/// gets a code + next step, never a bare io panic.
+impl From<std::io::Error> for TacitusError {
+    fn from(err: std::io::Error) -> Self {
+        TacitusError::new(
+            "IO_ERROR",
+            err.to_string(),
+            "Check the vault path exists and is writable.",
+        )
+    }
+}

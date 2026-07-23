@@ -46,6 +46,16 @@ impl VaultIndex {
         self.notes.get(id)
     }
 
+    /// Reflect a written note into the live index (used after a commit/revert).
+    pub fn upsert_raw(&mut self, rel_path: &str, raw: &str) {
+        let note = parse_note(raw, rel_path);
+        self.notes.insert(note.id.clone(), note);
+    }
+
+    pub fn remove_note(&mut self, id: &str) {
+        self.notes.remove(id);
+    }
+
     /// Resolve a wikilink target: exact id first, then basename (case-insensitive).
     pub fn resolve(&self, target: &str) -> Option<&Note> {
         if let Some(note) = self.notes.get(target) {
