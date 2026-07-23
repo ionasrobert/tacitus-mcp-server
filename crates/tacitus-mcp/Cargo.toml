@@ -1,0 +1,19 @@
+[package]
+name = "tacitus-mcp"
+description = "Tacitus MCP server (Rust, rmcp) — single-binary, local-first."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tacitus-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "2.2.0", features = ["server", "transport-io", "macros"] }
+schemars = "1.2.1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0.151"
+tacitus-core = { path = "../tacitus-core" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }

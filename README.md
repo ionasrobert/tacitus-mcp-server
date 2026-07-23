@@ -90,9 +90,10 @@ your-vault/
 ## Development
 
 Polyglot monorepo. The reference server (shipped on npm) is TypeScript in
-`packages/mcp-server`. A Rust engine in `crates/tacitus-core` is being ported for
-an eventual single-binary, zero-runtime-deps build — its `stable_id` matches the
-TS engine byte-for-byte, so memory ids are identical across both.
+`packages/mcp-server`. A **native Rust server** in `crates/` is being ported for a
+single-binary, zero-runtime-deps build (`crates/tacitus-core` engine +
+`crates/tacitus-mcp` rmcp server). Its `stable_id` matches the TS engine
+byte-for-byte, so memory ids are identical across both engines.
 
 ```bash
 # TypeScript server
@@ -103,11 +104,16 @@ npm run lint
 npm run build     # tsup → packages/mcp-server/dist
 npm run eval      # retrieval quality report
 
-# Rust engine
+# Rust server (native, single binary)
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+cargo run -p tacitus-mcp -- /path/to/vault   # runs the memory MCP server on stdio
+cargo build --release                         # → target/release/tacitus-mcp
 ```
+
+The Rust server currently exposes the memory tools (`remember`, `recall`,
+`forget`); retrieval and write-back tools are being ported next.
 
 ## License
 
