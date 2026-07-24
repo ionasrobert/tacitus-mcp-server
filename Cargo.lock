@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "regex",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "rmcp",
  "schemars",
@@ -666,6 +666,16 @@ dependencies = [
  "serde_yaml",
  "tacitus-core",
  "tokio",
+]
+
+[[package]]
+name = "tacitus-sync"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tacitus-core",
 ]
 
 [[package]]

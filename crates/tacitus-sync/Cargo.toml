@@ -1,0 +1,13 @@
+[package]
+name = "tacitus-sync"
+description = "CRDT sync engine for Tacitus vaults — E2E-encrypted, relay-based."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tacitus-core = { path = "../tacitus-core" }
