@@ -20,9 +20,10 @@ use tacitus_core::memory::recall::RecallArgs;
 use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
 use tacitus_core::vault::{
-    get_note, graph_query, parse_note, properties_query, render_template, search_notes, ChangeOp,
-    Changeset, HashingEmbedder, NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp,
-    PropertiesQueryArgs, Relation, SearchArgs, SearchMode, TemplateStore, VaultIndex,
+    get_note, graph_query, list_tasks, parse_note, properties_query, render_template, search_notes,
+    toggled_content, ChangeOp, Changeset, HashingEmbedder, NoteFormat, NoteWriter, PermissionScope,
+    PropFilter, PropOp, PropertiesQueryArgs, Relation, SearchArgs, SearchMode, TaskFilter,
+    TemplateStore, VaultIndex,
 };
 
 #[derive(Clone)]
@@ -157,6 +158,29 @@ struct CreateFromTemplateArgs {
     note_id: String,
     /// Placeholder values, e.g. {"title": "Standup", "p": 3}. Scalars only.
     vars: Option<Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ListTasksArgs {
+    /// false = open tasks, true = done, omitted = all.
+    done: Option<bool>,
+    /// Only tasks due strictly before this ISO date (YYYY-MM-DD).
+    due_before: Option<String>,
+    /// Only tasks due on/after this ISO date.
+    due_after: Option<String>,
+    tag: Option<String>,
+    note_id: Option<String>,
+    limit: Option<usize>,
+    token_budget: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ToggleTaskArgs {
+    note_id: String,
+    /// The task's `line` as returned by list_tasks.
+    line: usize,
+    /// The task's `text` as returned by list_tasks — a concurrency guard.
+    expect_text: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -605,6 +629,62 @@ impl TacitusServer {
         let mut writer = self.writer.lock().expect("writer mutex poisoned");
         match writer.create_note(&args.note_id, &note.content, frontmatter) {
             Ok(result) => ok(json!({ "version_id": result.version_id, "note_id": args.note_id })),
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
+    }
+
+    #[tool(
+        description = "List tasks (checklist lines) across the vault as typed entities: text, done, due (from due:YYYY-MM-DD or 📅 YYYY-MM-DD), #tags. Filter by done/due_before/due_after/tag/note_id; sorted by due date; bounded by limit + token_budget."
+    )]
+    async fn list_tasks(&self, Parameters(args): Parameters<ListTasksArgs>) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let tasks = list_tasks(
+            &index,
+            &TaskFilter {
+                done: args.done,
+                due_before: args.due_before,
+                due_after: args.due_after,
+                tag: args.tag,
+                note_id: args.note_id,
+                limit: args.limit,
+                token_budget: args.token_budget,
+            },
+        );
+        let tasks: Vec<Value> = tasks
+            .iter()
+            .map(|t| {
+                json!({ "note_id": t.note_id, "line": t.line, "text": t.text, "done": t.done, "due": t.due, "tags": t.tags, "token_count": t.token_count })
+            })
+            .collect();
+        ok(json!({ "tasks": tasks }))
+    }
+
+    #[tool(
+        description = "Flip a task's checkbox (versioned + audited). Pass the line and text exactly as returned by list_tasks — if the line changed since, you get a CONFLICT instead of toggling the wrong task."
+    )]
+    async fn toggle_task(&self, Parameters(args): Parameters<ToggleTaskArgs>) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let Some(note) = index.get(&args.note_id) else {
+            return err(
+                "NOTE_NOT_FOUND",
+                format!("No note with id {:?}.", args.note_id),
+                "Use list_tasks to discover tasks.",
+            );
+        };
+        let new_content =
+            match toggled_content(&args.note_id, &note.content, args.line, &args.expect_text) {
+                Ok(c) => c,
+                Err(e) => return err(&e.code, e.reason, &e.suggestion),
+            };
+        let mut writer = self.writer.lock().expect("writer mutex poisoned");
+        match writer.update_note(&args.note_id, Some(new_content), None) {
+            Ok(result) => ok(json!({ "version_id": result.version_id })),
             Err(e) => err(&e.code, e.reason, &e.suggestion),
         }
     }

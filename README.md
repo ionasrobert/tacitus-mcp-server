@@ -85,6 +85,7 @@ same on-disk formats, so a vault works with either. Set
 | **Write-back** | `propose_changes`, `commit_changes`, `revert` |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
 | **Templates** | `list_templates`*, `create_from_template`* |
+| **Tasks** | `list_tasks`*, `toggle_task`* |
 | **Meta** | `capabilities` |
 
 \* Native-Rust-server first (the npm server will catch up):
@@ -94,6 +95,10 @@ token_budget). Templates — Markdown files in `.tacitus/templates/` whose
 `{{var}}` placeholders form a schema; substitution happens before YAML
 parsing so numeric vars stay typed, `{{date}}`/`{{time}}`/`{{datetime}}`
 auto-fill, and creation is versioned + audited like any agent write.
+Tasks — every checklist line (`- [ ]`) as a typed entity (done, due from
+`due:YYYY-MM-DD` or `📅`, #tags), queryable and toggleable; toggling takes
+the task text as a concurrency guard so a stale caller gets a CONFLICT
+instead of flipping the wrong task.
 
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.
