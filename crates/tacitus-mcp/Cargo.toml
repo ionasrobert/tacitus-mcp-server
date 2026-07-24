@@ -12,10 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 rmcp = { version = "2.2.0", features = ["server", "transport-io", "macros"] }
-schemars = "1.2.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.151"
-serde_yaml = { workspace = true }
-tacitus-core = { path = "../tacitus-core", features = ["ollama"] }
+tacitus-core = { path = "../tacitus-core", features = ["ollama", "schemas"] }
 tacitus-sync = { path = "../tacitus-sync", features = ["client"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }

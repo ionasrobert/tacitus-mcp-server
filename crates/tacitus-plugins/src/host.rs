@@ -15,9 +15,10 @@ use wasmtime::{
     StoreLimitsBuilder, Trap, TypedFunc,
 };
 
+use tacitus_core::tools::ToolRegistry;
+
 use crate::abi;
 use crate::manifest::PluginManifest;
-use crate::registry::ToolRegistry;
 
 /// Host policy — a manifest can never raise these.
 pub struct HostConfig {
@@ -109,7 +110,10 @@ impl PluginHost {
         })?;
 
         let state = PluginState {
-            registry: Arc::new(ToolRegistry::standard(vault, manifest.permissions.scope)),
+            registry: Arc::new(
+                ToolRegistry::standard(vault, manifest.permissions.scope)
+                    .with_identity("tacitus-plugins", env!("CARGO_PKG_VERSION")),
+            ),
             allowlist: manifest.permissions.tools.iter().cloned().collect(),
             logs: Vec::new(),
             limits: StoreLimitsBuilder::new()

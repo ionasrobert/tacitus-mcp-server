@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tacitus_core::error::TacitusError;
 use tacitus_core::vault::PermissionScope;
 
-use crate::registry::ToolDescriptor;
+use tacitus_core::tools::ToolDescriptor;
 
 pub const MANIFEST_FILE: &str = "tacitus-plugin.toml";
 
@@ -138,7 +138,7 @@ impl PluginManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::ToolRegistry;
+    use tacitus_core::tools::ToolRegistry;
 
     const VALID: &str = r#"
 name = "hello-tacitus"

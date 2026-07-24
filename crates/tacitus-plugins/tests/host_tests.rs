@@ -31,8 +31,8 @@ fn vault(tag: &str) -> PathBuf {
 }
 
 /// Write a plugin dir (dir name == manifest name, as `load` requires) with the
-/// given WAT compiled to plugin.wasm and the given tool allowlist.
-fn plugin_dir(tag: &str, wat_src: &str, tools: &[&str]) -> PathBuf {
+/// given WAT compiled to plugin.wasm, tool allowlist and scope.
+fn plugin_dir_scoped(tag: &str, wat_src: &str, tools: &[&str], scope: &str) -> PathBuf {
     let dir = temp(&format!("plugin-{tag}")).join("fixture");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("plugin.wasm"), wat::parse_str(wat_src).unwrap()).unwrap();
@@ -40,7 +40,7 @@ fn plugin_dir(tag: &str, wat_src: &str, tools: &[&str]) -> PathBuf {
     fs::write(
         dir.join("tacitus-plugin.toml"),
         format!(
-            "name = \"fixture\"\nversion = \"0.0.1\"\nentry = \"plugin.wasm\"\n\n[permissions]\nscope = \"read-only\"\ntools = [{}]\n",
+            "name = \"fixture\"\nversion = \"0.0.1\"\nentry = \"plugin.wasm\"\n\n[permissions]\nscope = \"{scope}\"\ntools = [{}]\n",
             tools_toml.join(", ")
         ),
     )
@@ -48,8 +48,13 @@ fn plugin_dir(tag: &str, wat_src: &str, tools: &[&str]) -> PathBuf {
     dir
 }
 
+fn plugin_dir(tag: &str, wat_src: &str, tools: &[&str]) -> PathBuf {
+    plugin_dir_scoped(tag, wat_src, tools, "read-only")
+}
+
 const ECHO: &str = include_str!("fixtures/echo.wat");
 const CALL_SEARCH: &str = include_str!("fixtures/call_search.wat");
+const CALL_CREATE_NOTE: &str = include_str!("fixtures/call_create_note.wat");
 const INFINITE_LOOP: &str = include_str!("fixtures/infinite_loop.wat");
 const GROW_MEMORY: &str = include_str!("fixtures/grow_memory.wat");
 const BAD_JSON: &str = include_str!("fixtures/bad_json.wat");
@@ -108,6 +113,25 @@ fn guest_call_search_flows_through() {
     let hits = out["data"]["hits"].as_array().unwrap();
     assert!(!hits.is_empty(), "real hits from the temp vault");
     assert_eq!(hits[0]["note_id"], "notes/alpha");
+}
+
+#[test]
+fn guest_write_tool_flows_through_readwrite_manifest() {
+    let vault_dir = vault("write");
+    let host = PluginHost::new(HostConfig::default()).unwrap();
+    let mut plugin = host
+        .load(
+            &plugin_dir_scoped("write", CALL_CREATE_NOTE, &["create_note"], "read-write"),
+            &vault_dir,
+        )
+        .unwrap();
+    let out = plugin.run(&json!({})).unwrap();
+    assert_eq!(out["ok"], true, "create_note envelope: {out}");
+    assert!(out["data"]["version_id"].is_string(), "versioned write");
+    assert!(
+        vault_dir.join("notes/from-guest.md").exists(),
+        "the note landed on disk"
+    );
 }
 
 #[test]

@@ -2106,10 +2106,11 @@ dependencies = [
 
 [[package]]
 name = "tacitus-core"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2119,13 +2120,11 @@ dependencies = [
 
 [[package]]
 name = "tacitus-mcp"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "rmcp",
- "schemars",
  "serde",
  "serde_json",
- "serde_yaml",
  "tacitus-core",
  "tacitus-sync",
  "tokio",
@@ -2133,11 +2132,10 @@ dependencies = [
 
 [[package]]
 name = "tacitus-plugins"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "serde",
  "serde_json",
- "serde_yaml",
  "tacitus-core",
  "toml",
  "wasmtime",
@@ -2146,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-relay"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "axum",
  "base64",
@@ -2163,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-sync"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "argon2",
  "base64",

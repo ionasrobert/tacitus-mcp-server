@@ -220,12 +220,15 @@ len` packed into an `i64`.
 | `call` | `(tool_ptr, tool_len, args_ptr, args_len: i32) -> i64` | run an allowlisted tool; **always** returns an envelope — denial is `PERMISSION_DENIED` data, never a trap |
 | `log` | `(level: i32, ptr: i32, len: i32)` | 0=debug 1=info 2=warn 3=error; captured by the host |
 
-Tools reachable in the sandbox today (a curated subset of the server's
-contract; the full registry is on the roadmap): `capabilities`, `search`,
-`get_note`, `list_notes`, `graph_query`, `list_tasks`, `properties_query`,
-`recall` (read) · `create_note`, `update_note`, `remember` (write, need
-`scope = "read-write"`). Writes go through the same transactional
-`NoteWriter` as every agent — versioned, audited, revertible.
+**All 25 tools of [MCP_API.md](./MCP_API.md) are reachable in the sandbox** —
+the host and the MCP server share one registry (`tacitus_core::tools`), so the
+surfaces cannot diverge. The manifest allowlist gates which of them a plugin
+may call; the 12 write tools (`remember`, `forget`, `commit_changes`,
+`revert`, `create_note`, `update_note`, `link`, `tag`, `create_from_template`,
+`toggle_task`, `rename_note`, `delete_note`) additionally require
+`scope = "read-write"`. (`propose_changes` is a dry-run and stays available
+read-only — committing is the guarded step.) Writes go through the same
+transactional `NoteWriter` as every agent — versioned, audited, revertible.
 
 ### Limits (host policy — a manifest can never raise them)
 
@@ -248,7 +251,7 @@ cargo run -p tacitus-plugins --example run_plugin -- \
   /path/to/vault examples/plugins/hello-tacitus '{"query":"launch"}'
 ```
 
-Roadmap from here: the full tool registry shared with the MCP server, a
-`tacitus-mcp plugin run|list` CLI, desktop integration with permission-consent
-UI, lifecycle hooks (`on_note_saved`), and a TS/Deno host. If you build
-something, open an issue — real integrations shape this design.
+Roadmap from here: a `tacitus-mcp plugin run|list` CLI, desktop integration
+with permission-consent UI, lifecycle hooks (`on_note_saved`), and a TS/Deno
+host. If you build something, open an issue — real integrations shape this
+design.

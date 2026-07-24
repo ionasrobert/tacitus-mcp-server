@@ -9,6 +9,10 @@ repository.workspace = true
 [features]
 # Neural embeddings via a local Ollama daemon (/api/embed), opt-in.
 ollama = ["dep:ureq"]
+# JSON schemas (schemars) on the shared tool arg structs in `tools` — enabled
+# by the MCP server so rmcp can publish tools/list schemas; off by default so
+# library consumers (plugin host, desktop) stay schemars-free.
+schemas = ["dep:schemars"]
 
 [dependencies]
 serde.workspace = true
@@ -18,3 +22,4 @@ sha2.workspace = true
 chrono.workspace = true
 regex.workspace = true
 ureq = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }

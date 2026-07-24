@@ -2,8 +2,10 @@
 
 The MCP tool contract **is** Tacitus's public API — the same surface agents,
 plugins, scripts, and the desktop app build on. This page documents every tool
-of the native server (v0.7.0, 25 tools). The npm server exposes the core 16
-(all except those marked **native-first**).
+of the native server (v0.15.0, 25 tools). The npm server exposes the core 16
+(all except those marked **native-first**). The identical contract — same
+registry, same envelopes — is also served inside the WASM plugin sandbox via
+`tacitus.call` (see [PLUGINS.md §5](./PLUGINS.md#5-sandboxed-wasm-plugins-experimental)).
 
 ## Transport & envelope
 
