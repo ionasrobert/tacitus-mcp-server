@@ -82,7 +82,7 @@ same on-disk formats, so a vault works with either. Set
 |---|---|
 | **Memory** | `remember`, `recall`, `forget` |
 | **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes`, `properties_query`* |
-| **Write-back** | `propose_changes`, `commit_changes`, `revert` |
+| **Write-back** | `propose_changes`, `commit_changes`, `revert`, `rename_note`*, `delete_note`* |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
 | **Templates** | `list_templates`*, `create_from_template`* |
 | **Tasks** | `list_tasks`*, `toggle_task`* |
@@ -98,7 +98,9 @@ auto-fill, and creation is versioned + audited like any agent write.
 Tasks — every checklist line (`- [ ]`) as a typed entity (done, due from
 `due:YYYY-MM-DD` or `📅`, #tags), queryable and toggleable; toggling takes
 the task text as a concurrency guard so a stale caller gets a CONFLICT
-instead of flipping the wrong task.
+instead of flipping the wrong task. `rename_note` retargets every wikilink
+that resolves to the note (alias/heading kept) in one atomic changeset —
+a single revert undoes the whole rename; `delete_note` is versioned too.
 
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.

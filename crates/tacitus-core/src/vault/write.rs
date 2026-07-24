@@ -258,6 +258,15 @@ impl NoteWriter {
         })
     }
 
+    /// Delete a note (auto-committed) — versioned and revertible.
+    pub fn delete_note(&mut self, note_id: &str) -> Result<CommitResult, TacitusError> {
+        self.apply(Changeset {
+            ops: vec![ChangeOp::Delete {
+                note_id: note_id.to_string(),
+            }],
+        })
+    }
+
     /// Append a `[[to]]` wikilink to the source note (idempotent).
     pub fn link(&mut self, from: &str, to: &str) -> Result<CommitResult, TacitusError> {
         let note = self.current_note(from)?.ok_or_else(|| not_found(from))?;

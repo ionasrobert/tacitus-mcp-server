@@ -20,10 +20,10 @@ use tacitus_core::memory::recall::RecallArgs;
 use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
 use tacitus_core::vault::{
-    get_note, graph_query, list_tasks, parse_note, properties_query, render_template, search_notes,
-    toggled_content, ChangeOp, Changeset, HashingEmbedder, NoteFormat, NoteWriter, PermissionScope,
-    PropFilter, PropOp, PropertiesQueryArgs, Relation, SearchArgs, SearchMode, TaskFilter,
-    TemplateStore, VaultIndex,
+    get_note, graph_query, list_tasks, parse_note, properties_query, rename_note_ops,
+    render_template, search_notes, toggled_content, ChangeOp, Changeset, HashingEmbedder,
+    NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp, PropertiesQueryArgs, Relation,
+    SearchArgs, SearchMode, TaskFilter, TemplateStore, VaultIndex,
 };
 
 #[derive(Clone)]
@@ -181,6 +181,17 @@ struct ToggleTaskArgs {
     line: usize,
     /// The task's `text` as returned by list_tasks — a concurrency guard.
     expect_text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RenameNoteArgs {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DeleteNoteArgs {
+    note_id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -684,6 +695,44 @@ impl TacitusServer {
             };
         let mut writer = self.writer.lock().expect("writer mutex poisoned");
         match writer.update_note(&args.note_id, Some(new_content), None) {
+            Ok(result) => ok(json!({ "version_id": result.version_id })),
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
+    }
+
+    #[tool(
+        description = "Rename a note AND retarget every wikilink that resolves to it (alias/heading kept) — one atomic, versioned changeset; a single revert undoes the whole rename."
+    )]
+    async fn rename_note(&self, Parameters(args): Parameters<RenameNoteArgs>) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let changeset = match rename_note_ops(&index, &args.from, &args.to) {
+            Ok(cs) => cs,
+            Err(e) => return err(&e.code, e.reason, &e.suggestion),
+        };
+        let updated = changeset.ops.len().saturating_sub(2); // minus create+delete
+        let mut writer = self.writer.lock().expect("writer mutex poisoned");
+        let proposal = match writer.propose(changeset) {
+            Ok(p) => p,
+            Err(e) => return err(&e.code, e.reason, &e.suggestion),
+        };
+        match writer.commit(&proposal.change_id) {
+            Ok(result) => ok(json!({
+                "version_id": result.version_id,
+                "from": args.from,
+                "to": args.to,
+                "links_updated_in": updated,
+            })),
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
+    }
+
+    #[tool(description = "Delete a note (versioned + audited — revert restores it).")]
+    async fn delete_note(&self, Parameters(args): Parameters<DeleteNoteArgs>) -> CallToolResult {
+        let mut writer = self.writer.lock().expect("writer mutex poisoned");
+        match writer.delete_note(&args.note_id) {
             Ok(result) => ok(json!({ "version_id": result.version_id })),
             Err(e) => err(&e.code, e.reason, &e.suggestion),
         }
