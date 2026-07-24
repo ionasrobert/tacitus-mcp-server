@@ -117,6 +117,8 @@ public API, with permission scoping, versioning, and audit built in.
   (params, returns, error codes)
 - [docs/DATA_FORMAT.md](./docs/DATA_FORMAT.md) — the on-disk format
   (`.tacitus/` internals, stable ids, note conventions)
+- [examples/](./examples/) — two complete zero-dependency plugins (Python
+  read-only analyzer, Node daily-note cron agent), tested against the binary
 
 ## Semantic search (optional neural embeddings)
 

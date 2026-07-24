@@ -127,6 +127,13 @@ Key modules: `vault` (index, search, graph, properties, tasks, templates,
 rename, transactional `NoteWriter`) and `memory` (remember/recall/store).
 All mutation helpers are versioned + audited automatically.
 
+## Complete runnable examples
+
+Two zero-dependency plugins live in [`examples/`](../examples/):
+[`vault_digest.py`](../examples/vault_digest.py) (read-only analyzer) and
+[`daily_note.mjs`](../examples/daily_note.mjs) (capturer/cron agent —
+template pack install, CONFLICT recovery, idempotent re-runs). Start there.
+
 ## Plugin patterns
 
 **Read-only analyzer** — run with `TACITUS_SCOPE=read-only`; combine
