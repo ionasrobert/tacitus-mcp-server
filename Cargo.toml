@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ionasrobert/tacitus-mcp-server"
@@ -19,6 +19,9 @@ regex = "1"
 # minors and the whole CRDT surface is wrapped in docs.rs/merge.rs.
 yrs = "=0.27.3"
 dissimilar = "1"
+# Optional neural embedder (tacitus-core feature "ollama"): blocking HTTP to
+# the local Ollama daemon — kept out of the default build.
+ureq = { version = "3", features = ["json"] }
 # E2E encryption (tacitus-sync): pure-Rust RustCrypto stack — safe for
 # cargo-dist cross builds (no C toolchain).
 chacha20poly1305 = "0.10"

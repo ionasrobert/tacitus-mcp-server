@@ -115,6 +115,10 @@ public API, with permission scoping, versioning, and audit built in.
   write a plugin in Python/TypeScript, embed the Rust engine, plugin patterns
 - [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 25 tools
   (params, returns, error codes)
+- Neural search (opt-in): `TACITUS_EMBEDDER=ollama` uses a local Ollama daemon
+  for embeddings (`TACITUS_OLLAMA_EMBED_MODEL`, default `nomic-embed-text`;
+  needs an Ollama with embedding support). Vectors cached in `.tacitus/vectors/`;
+  falls back to the deterministic hashing embedder when unavailable.
 - [docs/SYNC.md](./docs/SYNC.md) — **Sync (beta)**: E2E-encrypted CRDT sync
   between devices (`tacitus-mcp sync init`)
 - [docs/DATA_FORMAT.md](./docs/DATA_FORMAT.md) — the on-disk format

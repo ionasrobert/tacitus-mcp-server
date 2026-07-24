@@ -1,5 +1,7 @@
 pub mod embed;
 pub mod embed_cache;
+#[cfg(feature = "ollama")]
+pub mod embed_ollama;
 pub mod get;
 pub mod graph;
 pub mod index;
@@ -15,6 +17,8 @@ pub mod write;
 
 pub use embed::{cosine, Embedder, HashingEmbedder};
 pub use embed_cache::CachedEmbedder;
+#[cfg(feature = "ollama")]
+pub use embed_ollama::OllamaEmbedder;
 pub use get::{get_note, GetNoteResult, NoteFormat};
 pub use graph::{graph_query, GraphNode, Relation};
 pub use index::VaultIndex;

@@ -29,6 +29,30 @@ use tacitus_core::vault::{
 
 mod sync_cli;
 
+/// The embedder for search/suggest tools. Default: the deterministic
+/// HashingEmbedder (offline, zero setup). `TACITUS_EMBEDDER=ollama` upgrades
+/// to neural embeddings via the local Ollama daemon (model from
+/// `TACITUS_OLLAMA_EMBED_MODEL`, default nomic-embed-text), disk-cached under
+/// .tacitus/vectors/ and falling back to hashing if the daemon is down.
+fn make_embedder(vault: &std::path::Path) -> Box<dyn tacitus_core::vault::Embedder> {
+    if std::env::var("TACITUS_EMBEDDER").as_deref() == Ok("ollama") {
+        let url = std::env::var("TACITUS_OLLAMA_URL")
+            .unwrap_or_else(|_| tacitus_core::vault::embed_ollama::DEFAULT_URL.into());
+        let model = std::env::var("TACITUS_OLLAMA_EMBED_MODEL")
+            .unwrap_or_else(|_| tacitus_core::vault::embed_ollama::DEFAULT_MODEL.into());
+        match tacitus_core::vault::OllamaEmbedder::probe(&url, &model) {
+            Ok(embedder) => {
+                let cache = vault.join(".tacitus").join("vectors").join("ollama.json");
+                return Box::new(tacitus_core::vault::CachedEmbedder::new(embedder, cache));
+            }
+            Err(e) => {
+                eprintln!("TACITUS_EMBEDDER=ollama unavailable ({e}); using hashing embedder")
+            }
+        }
+    }
+    Box::new(HashingEmbedder::new())
+}
+
 #[derive(Clone)]
 struct TacitusServer {
     vault: PathBuf,
@@ -367,9 +391,7 @@ impl TacitusServer {
             Some("semantic") => SearchMode::Semantic,
             _ => SearchMode::Hybrid,
         };
-        // Default offline embedder. A cached/neural embedder drops in here
-        // behind the same Embedder trait when configured.
-        let embedder = HashingEmbedder::new();
+        let embedder = make_embedder(&self.vault);
         let hits = search_notes(
             &index,
             &args.query,
@@ -378,7 +400,7 @@ impl TacitusServer {
                 token_budget: args.token_budget,
                 top_k: args.top_k,
             },
-            &embedder,
+            embedder.as_ref(),
         );
         let hits: Vec<Value> = hits
             .iter()
@@ -453,13 +475,11 @@ impl TacitusServer {
             Ok(i) => i,
             Err(r) => return r,
         };
-        // Default offline embedder. A cached/neural embedder drops in here
-        // behind the same Embedder trait when configured.
-        let embedder = HashingEmbedder::new();
+        let embedder = make_embedder(&self.vault);
         match suggest_links(
             &index,
             &args.note_id,
-            &embedder,
+            embedder.as_ref(),
             &SuggestArgs {
                 top_k: args.top_k,
                 min_score: args.min_score,

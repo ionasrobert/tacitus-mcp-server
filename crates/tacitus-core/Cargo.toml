@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Neural embeddings via a local Ollama daemon (/api/embed), opt-in.
+ollama = ["dep:ureq"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -13,3 +17,4 @@ serde_yaml.workspace = true
 sha2.workspace = true
 chrono.workspace = true
 regex.workspace = true
+ureq = { workspace = true, optional = true }
