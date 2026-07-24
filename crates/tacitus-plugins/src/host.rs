@@ -26,6 +26,10 @@ pub struct HostConfig {
     pub fuel_per_run: u64,
     /// Linear-memory ceiling for the guest.
     pub max_memory_bytes: usize,
+    /// Wall-clock ceiling per run (epoch interruption), for embedders where a
+    /// hung guest must not pin a thread (fuel bounds instructions, not time).
+    /// `None` = disabled (default; identical behavior to before this field).
+    pub epoch_deadline_ms: Option<u64>,
 }
 
 impl Default for HostConfig {
@@ -33,6 +37,27 @@ impl Default for HostConfig {
         Self {
             fuel_per_run: 1_000_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
+            epoch_deadline_ms: None,
+        }
+    }
+}
+
+/// How often the ticker advances the engine epoch; the deadline is expressed
+/// in these ticks.
+const EPOCH_TICK_MS: u64 = 10;
+
+/// Background thread advancing the engine epoch — stopped (and joined) when
+/// the host drops, so tests creating many hosts don't leak tickers.
+struct EpochTicker {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -40,6 +65,8 @@ impl Default for HostConfig {
 pub struct PluginHost {
     engine: Engine,
     config: HostConfig,
+    /// Held for its Drop; only exists when epoch_deadline_ms is set.
+    _ticker: Option<EpochTicker>,
 }
 
 struct PluginState {
@@ -84,8 +111,36 @@ impl PluginHost {
     pub fn new(config: HostConfig) -> Result<Self, TacitusError> {
         let mut wt = Config::new();
         wt.consume_fuel(true);
+        if config.epoch_deadline_ms.is_some() {
+            wt.epoch_interruption(true);
+        }
         let engine = Engine::new(&wt).map_err(internal)?;
-        Ok(Self { engine, config })
+        let ticker = config.epoch_deadline_ms.map(|_| {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let engine_for_ticker = engine.clone();
+            let stop_for_ticker = stop.clone();
+            let handle = std::thread::spawn(move || {
+                while !stop_for_ticker.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(EPOCH_TICK_MS));
+                    engine_for_ticker.increment_epoch();
+                }
+            });
+            EpochTicker {
+                stop,
+                handle: Some(handle),
+            }
+        });
+        Ok(Self {
+            engine,
+            config,
+            _ticker: ticker,
+        })
+    }
+
+    fn epoch_deadline_ticks(&self) -> Option<u64> {
+        self.config
+            .epoch_deadline_ms
+            .map(|ms| (ms / EPOCH_TICK_MS).max(1))
     }
 
     /// Load a plugin: manifest → validate → compile → instantiate → ABI check.
@@ -152,6 +207,9 @@ impl PluginHost {
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
         store.set_fuel(self.config.fuel_per_run).map_err(internal)?;
+        if let Some(ticks) = self.epoch_deadline_ticks() {
+            store.set_epoch_deadline(ticks);
+        }
 
         let mut linker: Linker<PluginState> = Linker::new(&self.engine);
         linker
@@ -197,6 +255,7 @@ impl PluginHost {
             dealloc,
             run,
             fuel_per_run: self.config.fuel_per_run,
+            epoch_deadline_ticks: self.epoch_deadline_ticks(),
         })
     }
 }
@@ -209,6 +268,7 @@ pub struct PluginInstance {
     dealloc: TypedFunc<(i32, i32), ()>,
     run: TypedFunc<(i32, i32), i64>,
     fuel_per_run: u64,
+    epoch_deadline_ticks: Option<u64>,
 }
 
 impl std::fmt::Debug for PluginInstance {
@@ -225,10 +285,14 @@ impl PluginInstance {
         &self.manifest
     }
 
-    /// One plugin invocation: refuel, hand the input JSON to the guest, read
-    /// its `{ ok, data | error }` envelope back.
+    /// One plugin invocation: refuel (and refresh the wall-clock deadline),
+    /// hand the input JSON to the guest, read its `{ ok, data | error }`
+    /// envelope back.
     pub fn run(&mut self, input: &Value) -> Result<Value, TacitusError> {
         self.store.set_fuel(self.fuel_per_run).map_err(internal)?;
+        if let Some(ticks) = self.epoch_deadline_ticks {
+            self.store.set_epoch_deadline(ticks);
+        }
         let payload = json!({
             "input": input,
             "plugin": { "name": self.manifest.name, "version": self.manifest.version },

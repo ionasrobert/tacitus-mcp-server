@@ -207,6 +207,45 @@ fn guest_call_undeclared_tool_gets_envelope_not_trap() {
 }
 
 #[test]
+fn epoch_deadline_stops_wall_clock_runaway() {
+    // Fuel so large it would spin for hours — only the epoch (wall-clock)
+    // deadline can stop this guest. The test completing at all is the proof.
+    let host = PluginHost::new(HostConfig {
+        fuel_per_run: 1 << 60,
+        epoch_deadline_ms: Some(200),
+        ..HostConfig::default()
+    })
+    .unwrap();
+    let mut plugin = host
+        .load(&plugin_dir("epoch", INFINITE_LOOP, &[]), &vault("epoch"))
+        .unwrap();
+    let started = std::time::Instant::now();
+    let e = plugin.run(&json!({})).unwrap_err();
+    assert_eq!(e.code, "PLUGIN_TRAP");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "stopped by wall clock, not fuel"
+    );
+}
+
+#[test]
+fn epoch_deadline_refreshes_between_runs() {
+    let host = PluginHost::new(HostConfig {
+        epoch_deadline_ms: Some(300),
+        ..HostConfig::default()
+    })
+    .unwrap();
+    let mut plugin = host
+        .load(&plugin_dir("epochfresh", ECHO, &[]), &vault("epochfresh"))
+        .unwrap();
+    plugin.run(&json!({ "n": 1 })).unwrap();
+    // Let the wall clock pass the first deadline; a stale deadline would trap
+    // the second run immediately — the refresh must reset it.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    plugin.run(&json!({ "n": 2 })).unwrap();
+}
+
+#[test]
 fn runaway_guest_exhausts_fuel() {
     let host = PluginHost::new(HostConfig {
         fuel_per_run: 1_000_000,

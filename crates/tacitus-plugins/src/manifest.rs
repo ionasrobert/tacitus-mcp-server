@@ -28,7 +28,17 @@ pub struct PluginManifest {
     /// and `..` are rejected — the sandbox cannot be pointed outside its dir.
     pub entry: String,
     pub permissions: Permissions,
+    /// Events this plugin wants delivered automatically (see [`KNOWN_HOOKS`]).
+    /// Subscribing is a permission in its own right — embedders include it in
+    /// user consent. Delivery reuses `tacitus_run` with input
+    /// `{"event": {"type": …, …}}` — no ABI change.
+    #[serde(default)]
+    pub hooks: Vec<String>,
 }
+
+/// The lifecycle events an embedder may deliver. Unknown names are
+/// `INVALID_MANIFEST` at load, so typos fail loudly, not silently-never-fire.
+pub const KNOWN_HOOKS: &[&str] = &["note_saved"];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,6 +121,14 @@ impl PluginManifest {
                 return Err(invalid(
                     format!("Tool {wanted:?} writes to the vault but scope is \"read-only\"."),
                     "Drop the tool from [permissions].tools or set scope = \"read-write\".",
+                ));
+            }
+        }
+        for hook in &self.hooks {
+            if !KNOWN_HOOKS.contains(&hook.as_str()) {
+                return Err(invalid(
+                    format!("Unknown hook {hook:?} in `hooks`."),
+                    format!("Valid hooks: {}.", KNOWN_HOOKS.join(", ")),
                 ));
             }
         }
@@ -214,6 +232,31 @@ tools = ["capabilities", "search", "get_note"]
         let e = PluginManifest::parse(&unknown_key).unwrap_err();
         assert_eq!(e.code, "INVALID_MANIFEST", "deny_unknown_fields fires");
         assert!(e.reason.contains("network"));
+    }
+
+    #[test]
+    fn manifest_hooks_parse_and_unknown_rejected() {
+        // `hooks` is a top-level key — insert it before the [permissions] table.
+        let with_hooks = |hooks: &str| {
+            VALID.replace(
+                "[permissions]",
+                &format!("hooks = [{hooks}]\n\n[permissions]"),
+            )
+        };
+        let m = PluginManifest::parse(&with_hooks("\"note_saved\"")).unwrap();
+        assert_eq!(m.hooks, ["note_saved"]);
+        m.validate(ToolRegistry::descriptors()).unwrap();
+
+        // Manifests without hooks stay valid (default = empty).
+        assert!(PluginManifest::parse(VALID).unwrap().hooks.is_empty());
+
+        let m = PluginManifest::parse(&with_hooks("\"on_note_svaed\"")).unwrap();
+        let e = m.validate(ToolRegistry::descriptors()).unwrap_err();
+        assert_eq!(e.code, "INVALID_MANIFEST");
+        assert!(
+            e.suggestion.contains("note_saved"),
+            "lists valid hooks: {e}"
+        );
     }
 
     #[test]

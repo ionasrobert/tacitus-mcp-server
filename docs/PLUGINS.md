@@ -196,7 +196,17 @@ entry = "hello_tacitus.wasm"      # relative to this file; ".." rejected
 [permissions]
 scope = "read-only"               # "read-only" | "read-write"
 tools = ["search"]                # exact allowlist; anything else → PERMISSION_DENIED
+
+# optional: run automatically on lifecycle events (a permission in itself —
+# embedders include it in user consent). Valid hooks: note_saved.
+hooks = ["note_saved"]
 ```
+
+Hook delivery reuses `tacitus_run` with no ABI change — the input becomes
+`{"event": {"type": "note_saved", "note_id": "…"}}` inside the usual
+`{"input": …, "plugin": …}` payload. In the desktop app, hooks fire on editor
+saves only; plugin and sync writes never re-trigger them (no loops by
+construction).
 
 Validation happens at load, before any wasm compiles: unknown tools, write
 tools under `scope = "read-only"`, and entry paths that escape the plugin
@@ -233,9 +243,12 @@ transactional `NoteWriter` as every agent — versioned, audited, revertible.
 ### Limits (host policy — a manifest can never raise them)
 
 Each `run()` gets a deterministic **fuel** budget (default 10⁹ instructions)
-and the guest's linear memory is capped (default 64 MiB). A runaway or
-crashing guest surfaces as a structured `PLUGIN_TRAP`; a protocol violation
-(missing export, wrong ABI version, non-JSON output) as `PLUGIN_ABI`.
+and the guest's linear memory is capped (default 64 MiB). Embedders can also
+set a **wall-clock deadline** (`epoch_deadline_ms` — the desktop app uses 5s)
+so a hung guest cannot pin a thread; fuel bounds instructions, epochs bound
+time. A runaway or crashing guest surfaces as a structured `PLUGIN_TRAP`; a
+protocol violation (missing export, wrong ABI version, non-JSON output) as
+`PLUGIN_ABI`.
 
 ### Try it
 
