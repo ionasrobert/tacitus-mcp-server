@@ -106,6 +106,18 @@ a single revert undoes the whole rename; `delete_note` is versioned too.
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.
 
+## For developers: plugins & integrations
+
+**In Tacitus, a plugin is an MCP client** — the tool contract above is the
+public API, with permission scoping, versioning, and audit built in.
+
+- [docs/PLUGINS.md](./docs/PLUGINS.md) — integration guide: connect an agent,
+  write a plugin in Python/TypeScript, embed the Rust engine, plugin patterns
+- [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 24 tools
+  (params, returns, error codes)
+- [docs/DATA_FORMAT.md](./docs/DATA_FORMAT.md) — the on-disk format
+  (`.tacitus/` internals, stable ids, note conventions)
+
 ## Semantic search (optional neural embeddings)
 
 `search` defaults to **hybrid** mode (lexical + a deterministic, offline
