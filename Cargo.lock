@@ -1157,7 +1157,9 @@ version = "0.23.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 dependencies = [
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -1449,7 +1451,7 @@ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
 name = "tacitus-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "chrono",
  "regex",
@@ -1461,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-mcp"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "rmcp",
  "schemars",
@@ -1475,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-relay"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "axum",
  "base64",
@@ -1492,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-sync"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "argon2",
  "base64",
@@ -1500,6 +1502,7 @@ dependencies = [
  "dissimilar",
  "futures-util",
  "hkdf",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 # The async WebSocket driver shared by the CLI and the desktop app.
-client = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
+client = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls"]
 
 [dependencies]
 serde.workspace = true
@@ -24,3 +24,4 @@ tacitus-core = { path = "../tacitus-core" }
 tokio = { workspace = true, features = ["rt", "time", "macros", "net"], optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }

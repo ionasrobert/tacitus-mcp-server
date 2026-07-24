@@ -40,9 +40,19 @@ fn ws_url(relay_url: &str) -> String {
     }
 }
 
+/// rustls 0.23 needs a process-level crypto provider before the first TLS
+/// handshake (wss://). Tests use plain ws://, so only real relays hit this.
+fn ensure_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// One full sync pass: connect, push local changes, drain the backlog,
 /// return once the outbox is empty and the cursor caught up to the log.
 pub async fn run_once(engine: &mut SyncEngine, relay_url: &str) -> Result<RunReport, SyncError> {
+    ensure_crypto_provider();
     let (ws, _) = tokio_tungstenite::connect_async(ws_url(relay_url))
         .await
         .map_err(net_err)?;
