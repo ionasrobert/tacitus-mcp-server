@@ -483,7 +483,7 @@ impl TacitusServer {
         let scope = serde_json::to_value(self.scope).unwrap_or(Value::Null);
         ok(json!({
             "server": "tacitus-memory",
-            "version": "0.1.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "tools": tools,
             "permissions": { "scope": scope },
         }))

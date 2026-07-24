@@ -48,6 +48,34 @@ claude mcp add tacitus -- npx -y @dashiro/tacitus-mcp-server /path/to/your/vault
 }
 ```
 
+### Native binary (no Node)
+
+Prefer a single, zero-dependency binary? The Rust server ships prebuilt for
+macOS, Linux, and Windows on every release.
+
+```bash
+# macOS / Linux — installs `tacitus-mcp` into your Cargo bin dir
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ionasrobert/tacitus-mcp-server/releases/latest/download/tacitus-mcp-installer.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://github.com/ionasrobert/tacitus-mcp-server/releases/latest/download/tacitus-mcp-installer.ps1 | iex
+```
+
+Or grab a `.tar.xz` / `.zip` for your platform from the
+[latest release](https://github.com/ionasrobert/tacitus-mcp-server/releases/latest).
+Then point any MCP client at the binary instead of `npx`:
+
+```bash
+claude mcp add tacitus -- tacitus-mcp /path/to/your/vault
+```
+
+The native and npm servers are feature-identical (same 16 tools) and share the
+same on-disk formats, so a vault works with either. Set
+`TACITUS_SCOPE=read-only` to run the native server without write permissions.
+
 ## Tools
 
 | Group | Tools |
@@ -90,10 +118,11 @@ your-vault/
 ## Development
 
 Polyglot monorepo. The reference server (shipped on npm) is TypeScript in
-`packages/mcp-server`. A **native Rust server** in `crates/` is being ported for a
+`packages/mcp-server`. A **native Rust server** in `crates/` provides a
 single-binary, zero-runtime-deps build (`crates/tacitus-core` engine +
-`crates/tacitus-mcp` rmcp server). Its `stable_id` matches the TS engine
-byte-for-byte, so memory ids are identical across both engines.
+`crates/tacitus-mcp` rmcp server) at feature parity with the TS server — same 16
+tools. Its `stable_id` matches the TS engine byte-for-byte, so memory ids are
+identical across both engines.
 
 ```bash
 # TypeScript server
@@ -108,12 +137,13 @@ npm run eval      # retrieval quality report
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
-cargo run -p tacitus-mcp -- /path/to/vault   # runs the memory MCP server on stdio
+cargo run -p tacitus-mcp -- /path/to/vault   # runs the MCP server on stdio
 cargo build --release                         # → target/release/tacitus-mcp
 ```
 
-The Rust server currently exposes the memory tools (`remember`, `recall`,
-`forget`); retrieval and write-back tools are being ported next.
+Cross-platform release binaries are built and published to GitHub Releases by
+[cargo-dist](https://opensource.axo.dev/cargo-dist/) (`dist-workspace.toml` +
+`.github/workflows/release.yml`) on every `v*` tag.
 
 ## License
 
