@@ -35,7 +35,7 @@ pub struct SearchHit {
     pub token_count: usize,
 }
 
-fn make_snippet(query: &str, content: &str) -> String {
+pub(crate) fn make_snippet(query: &str, content: &str) -> String {
     let terms: std::collections::HashSet<String> = tokenize(query).into_iter().collect();
     let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = collapsed.to_lowercase();

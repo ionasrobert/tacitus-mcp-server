@@ -21,9 +21,10 @@ use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
 use tacitus_core::vault::{
     get_note, graph_query, list_tasks, parse_note, properties_query, rename_note_ops,
-    render_template, search_notes, toggled_content, ChangeOp, Changeset, HashingEmbedder,
-    NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp, PropertiesQueryArgs, Relation,
-    SearchArgs, SearchMode, TaskFilter, TemplateStore, VaultIndex,
+    render_template, search_notes, suggest_links, toggled_content, ChangeOp, Changeset,
+    HashingEmbedder, NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp,
+    PropertiesQueryArgs, Relation, SearchArgs, SearchMode, SuggestArgs, TaskFilter, TemplateStore,
+    VaultIndex,
 };
 
 #[derive(Clone)]
@@ -87,6 +88,16 @@ struct GraphArgs {
     from: String,
     relation: String,
     depth: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SuggestLinksArgs {
+    note_id: String,
+    /// Max suggestions to return (default 5).
+    top_k: Option<usize>,
+    /// Minimum blended score 0..1 to include (default 0.15).
+    min_score: Option<f32>,
+    token_budget: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -424,6 +435,43 @@ impl TacitusServer {
                     .map(|n| json!({ "note_id": n.note_id, "title": n.title }))
                     .collect();
                 ok(json!({ "from": args.from, "relation": args.relation, "nodes": nodes }))
+            }
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
+    }
+
+    #[tool(
+        description = "Suggest [[wikilinks]] a note is missing: ranked candidates it doesn't link to yet, scored by title mentions in the note, semantic similarity, shared tags, and existing backlinks — each with machine-readable reasons. Bounded by top_k/min_score/token_budget."
+    )]
+    async fn suggest_links(
+        &self,
+        Parameters(args): Parameters<SuggestLinksArgs>,
+    ) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        // Default offline embedder. A cached/neural embedder drops in here
+        // behind the same Embedder trait when configured.
+        let embedder = HashingEmbedder::new();
+        match suggest_links(
+            &index,
+            &args.note_id,
+            &embedder,
+            &SuggestArgs {
+                top_k: args.top_k,
+                min_score: args.min_score,
+                token_budget: args.token_budget,
+            },
+        ) {
+            Ok(suggestions) => {
+                let suggestions: Vec<Value> = suggestions
+                    .iter()
+                    .map(|s| {
+                        json!({ "note_id": s.note_id, "title": s.title, "score": s.score, "reasons": s.reasons, "snippet": s.snippet, "token_count": s.token_count })
+                    })
+                    .collect();
+                ok(json!({ "note_id": args.note_id, "suggestions": suggestions }))
             }
             Err(e) => err(&e.code, e.reason, &e.suggestion),
         }

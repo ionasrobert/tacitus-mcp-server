@@ -2,7 +2,7 @@
 
 The MCP tool contract **is** Tacitus's public API — the same surface agents,
 plugins, scripts, and the desktop app build on. This page documents every tool
-of the native server (v0.6.0, 24 tools). The npm server exposes the core 16
+of the native server (v0.7.0, 25 tools). The npm server exposes the core 16
 (all except those marked **native-first**).
 
 ## Transport & envelope
@@ -131,6 +131,24 @@ Traverse the wikilink graph instead of grepping.
 
 → `{ "from", "relation", "nodes": [{ "note_id", "title" }] }`
 Errors: `NOTE_NOT_FOUND`, `INVALID_INPUT`.
+
+### `suggest_links` *(native-first)*
+
+Auto-linking without an LLM: ranked `[[wikilink]]` candidates the note doesn't
+link to yet, scored by title mentions in the note, semantic similarity, shared
+tags, and existing backlinks. Each row carries machine-readable `reasons`
+(`title_mentioned` | `semantic` | `shared_tags` | `backlink`); for a mention,
+`snippet` shows the source context where the link would go.
+
+| Param | Type |
+|---|---|
+| `note_id` | string |
+| `top_k` | number (default 5) |
+| `min_score` | number 0..1 (default 0.15) |
+| `token_budget` | number (hard ceiling) |
+
+→ `{ "note_id", "suggestions": [{ "note_id", "title", "score", "reasons", "snippet", "token_count" }] }`
+Errors: `NOTE_NOT_FOUND`.
 
 ### `list_notes`
 

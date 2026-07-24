@@ -1,7 +1,7 @@
 # Building on Tacitus — Plugin & Integration Guide
 
 **In Tacitus, a plugin is an MCP client.** There is no privileged plugin API
-behind the app's back: the same 24-tool contract serves AI agents, your
+behind the app's back: the same 25-tool contract serves AI agents, your
 scripts, cron jobs, and the desktop app itself. That's a deliberate inversion
 of the Obsidian model — instead of plugins with full filesystem access, every
 integration gets:
