@@ -5,6 +5,8 @@
 //! merge them with remote updates; everything leaving the device is
 //! end-to-end encrypted, the relay only ever sees ciphertext.
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod crypto;
 pub mod docs;
 pub mod engine;

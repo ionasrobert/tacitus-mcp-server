@@ -27,6 +27,8 @@ use tacitus_core::vault::{
     VaultIndex,
 };
 
+mod sync_cli;
+
 #[derive(Clone)]
 struct TacitusServer {
     vault: PathBuf,
@@ -853,8 +855,19 @@ impl TacitusServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let vault = std::env::args()
-        .nth(1)
+    // `tacitus-mcp sync …` is the sync CLI; anything else is the MCP server
+    // with an optional vault path as the first argument (unchanged).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("sync") {
+        if let Err(e) = sync_cli::sync_main(&args[1..]).await {
+            eprintln!("sync: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    let vault = args
+        .first()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     // Minimum-privilege friendly: opt into read-only with TACITUS_SCOPE=read-only.

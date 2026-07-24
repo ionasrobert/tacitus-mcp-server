@@ -1,0 +1,25 @@
+[package]
+name = "tacitus-relay"
+description = "Dumb sync relay for Tacitus vaults: per-vault append-only log of E2E-encrypted updates + WebSocket fanout. Never sees plaintext."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deployed via Docker, not user installers.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+tacitus-sync = { path = "../tacitus-sync", features = ["client"] }
