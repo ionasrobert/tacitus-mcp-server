@@ -2,6 +2,18 @@
 
 **Long-term memory for your AI agents — local-first, with provenance.**
 
+> **This is the core server (16 tools).** The flagship **native binary**
+> (24 tools — adds `properties_query`, templates, tasks, `rename_note`,
+> `get_version` — zero runtime deps) ships for macOS/Linux/Windows via
+> [GitHub Releases](https://github.com/ionasrobert/tacitus-mcp-server/releases/latest):
+>
+> ```bash
+> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ionasrobert/tacitus-mcp-server/releases/latest/download/tacitus-mcp-installer.sh | sh
+> ```
+>
+> Both share the same on-disk format — a vault works with either.
+> Docs: [MCP API](https://github.com/ionasrobert/tacitus-mcp-server/tree/main/docs)
+
 An [MCP](https://modelcontextprotocol.io) server that turns any folder of
 Markdown notes into an agent-native knowledge base. It gives AI agents
 (Claude Code, Claude Desktop, and any MCP client) three things they actually
