@@ -251,7 +251,17 @@ cargo run -p tacitus-plugins --example run_plugin -- \
   /path/to/vault examples/plugins/hello-tacitus '{"query":"launch"}'
 ```
 
-Roadmap from here: a `tacitus-mcp plugin run|list` CLI, desktop integration
-with permission-consent UI, lifecycle hooks (`on_note_saved`), and a TS/Deno
-host. If you build something, open an issue — real integrations shape this
-design.
+### In the desktop app
+
+The Tacitus desktop app runs these plugins natively: it discovers
+`.tacitus/plugins/*` in the open vault, shows each plugin's **permissions
+before anything executes** (scope badge + tool allowlist), and requires
+explicit approval — consent is pinned to the permission set, so a plugin
+update that asks for more triggers re-approval. Runs execute in the same
+sandbox described above; writes land in the app's live index instantly and
+appear in the Activity tab attributed as `plugin:<name>`, diffable and
+revertible like any agent write.
+
+Roadmap from here: a `tacitus-mcp plugin run|list` CLI, lifecycle hooks
+(`on_note_saved`), and a TS/Deno host. If you build something, open an issue —
+real integrations shape this design.
