@@ -20,8 +20,9 @@ use tacitus_core::memory::recall::RecallArgs;
 use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
 use tacitus_core::vault::{
-    get_note, graph_query, search_notes, ChangeOp, Changeset, HashingEmbedder, NoteFormat,
-    NoteWriter, PermissionScope, Relation, SearchArgs, SearchMode, VaultIndex,
+    get_note, graph_query, properties_query, search_notes, ChangeOp, Changeset, HashingEmbedder,
+    NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp, PropertiesQueryArgs, Relation,
+    SearchArgs, SearchMode, VaultIndex,
 };
 
 #[derive(Clone)]
@@ -139,6 +140,25 @@ struct TagArgs {
 #[derive(Deserialize, JsonSchema)]
 struct AuditArgs {
     limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PropFilterArg {
+    key: String,
+    /// eq | ne | contains | exists | not_exists | gt | lt | gte | lte
+    op: String,
+    value: Option<Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PropertiesArgs {
+    #[serde(default)]
+    filters: Vec<PropFilterArg>,
+    select: Option<Vec<String>>,
+    sort_by: Option<String>,
+    descending: Option<bool>,
+    limit: Option<usize>,
+    token_budget: Option<usize>,
 }
 
 fn ok(data: Value) -> CallToolResult {
@@ -468,6 +488,55 @@ impl TacitusServer {
             }
             Err(e) => err(&e.code, e.reason, &e.suggestion),
         }
+    }
+
+    #[tool(
+        description = "Query notes by typed frontmatter properties (Bases-like). filters are AND-ed {key, op: eq|ne|contains|exists|not_exists|gt|lt|gte|lte, value}; contains = array membership or substring; gt/lt work on numbers and ISO dates. Optional select (project keys), sort_by/descending, limit (default 50), token_budget."
+    )]
+    async fn properties_query(
+        &self,
+        Parameters(args): Parameters<PropertiesArgs>,
+    ) -> CallToolResult {
+        let index = match build_index(&self.vault) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let mut filters = Vec::with_capacity(args.filters.len());
+        for f in args.filters {
+            let Some(op) = PropOp::parse(&f.op) else {
+                return err(
+                    "INVALID_INPUT",
+                    format!(
+                        "op must be eq|ne|contains|exists|not_exists|gt|lt|gte|lte (got {:?}).",
+                        f.op
+                    ),
+                    "Use a valid op.",
+                );
+            };
+            filters.push(PropFilter {
+                key: f.key,
+                op,
+                value: f.value,
+            });
+        }
+        let rows = properties_query(
+            &index,
+            &PropertiesQueryArgs {
+                filters,
+                select: args.select,
+                sort_by: args.sort_by,
+                descending: args.descending.unwrap_or(false),
+                limit: args.limit,
+                token_budget: args.token_budget,
+            },
+        );
+        let rows: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({ "note_id": r.note_id, "title": r.title, "properties": r.properties, "token_count": r.token_count })
+            })
+            .collect();
+        ok(json!({ "rows": rows }))
     }
 
     #[tool(description = "List available tools and the current permission scope.")]

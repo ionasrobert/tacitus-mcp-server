@@ -81,10 +81,14 @@ same on-disk formats, so a vault works with either. Set
 | Group | Tools |
 |---|---|
 | **Memory** | `remember`, `recall`, `forget` |
-| **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes` |
+| **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes`, `properties_query`* |
 | **Write-back** | `propose_changes`, `commit_changes`, `revert` |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
 | **Meta** | `capabilities` |
+
+\* `properties_query` (Bases-like structured queries over YAML frontmatter —
+filters `eq|ne|contains|exists|not_exists|gt|lt|gte|lte`, sort, select,
+token_budget) ships in the **native Rust server**; the npm server will catch up.
 
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.
