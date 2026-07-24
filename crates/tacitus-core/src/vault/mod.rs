@@ -6,6 +6,7 @@ pub mod index;
 pub mod parse;
 pub mod properties;
 pub mod search;
+pub mod template;
 pub mod types;
 pub mod write;
 
@@ -17,6 +18,7 @@ pub use index::VaultIndex;
 pub use parse::parse_note;
 pub use properties::{properties_query, PropFilter, PropOp, PropertiesQueryArgs, PropertiesRow};
 pub use search::{search_notes, SearchArgs, SearchHit, SearchMode};
+pub use template::{render_template, template_vars, Template, TemplateStore};
 pub use types::{Heading, Note, WikiLink};
 pub use write::{
     AuditEntry, ChangeOp, Changeset, CommitResult, DiffEntry, NoteWriter, PermissionScope,

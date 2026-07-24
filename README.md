@@ -84,11 +84,16 @@ same on-disk formats, so a vault works with either. Set
 | **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes`, `properties_query`* |
 | **Write-back** | `propose_changes`, `commit_changes`, `revert` |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
+| **Templates** | `list_templates`*, `create_from_template`* |
 | **Meta** | `capabilities` |
 
-\* `properties_query` (Bases-like structured queries over YAML frontmatter —
-filters `eq|ne|contains|exists|not_exists|gt|lt|gte|lte`, sort, select,
-token_budget) ships in the **native Rust server**; the npm server will catch up.
+\* Native-Rust-server first (the npm server will catch up):
+`properties_query` — Bases-like structured queries over YAML frontmatter
+(filters `eq|ne|contains|exists|not_exists|gt|lt|gte|lte`, sort, select,
+token_budget). Templates — Markdown files in `.tacitus/templates/` whose
+`{{var}}` placeholders form a schema; substitution happens before YAML
+parsing so numeric vars stay typed, `{{date}}`/`{{time}}`/`{{datetime}}`
+auto-fill, and creation is versioned + audited like any agent write.
 
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.

@@ -20,9 +20,9 @@ use tacitus_core::memory::recall::RecallArgs;
 use tacitus_core::memory::types::MemoryType;
 use tacitus_core::memory::{recall, remember, MemoryStore, ProvenanceInput, RememberInput};
 use tacitus_core::vault::{
-    get_note, graph_query, properties_query, search_notes, ChangeOp, Changeset, HashingEmbedder,
-    NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp, PropertiesQueryArgs, Relation,
-    SearchArgs, SearchMode, VaultIndex,
+    get_note, graph_query, parse_note, properties_query, render_template, search_notes, ChangeOp,
+    Changeset, HashingEmbedder, NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp,
+    PropertiesQueryArgs, Relation, SearchArgs, SearchMode, TemplateStore, VaultIndex,
 };
 
 #[derive(Clone)]
@@ -148,6 +148,15 @@ struct PropFilterArg {
     /// eq | ne | contains | exists | not_exists | gt | lt | gte | lte
     op: String,
     value: Option<Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CreateFromTemplateArgs {
+    /// A template name from list_templates.
+    template: String,
+    note_id: String,
+    /// Placeholder values, e.g. {"title": "Standup", "p": 3}. Scalars only.
+    vars: Option<Value>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -537,6 +546,67 @@ impl TacitusServer {
             })
             .collect();
         ok(json!({ "rows": rows }))
+    }
+
+    #[tool(
+        description = "List note templates (.tacitus/templates/*.md) with the vars each requires. Builtins {{date}}/{{time}}/{{datetime}} auto-fill."
+    )]
+    async fn list_templates(&self) -> CallToolResult {
+        match TemplateStore::new(&self.vault).list() {
+            Ok(templates) => {
+                let templates: Vec<Value> = templates
+                    .iter()
+                    .map(|t| json!({ "name": t.name, "vars": t.vars }))
+                    .collect();
+                ok(json!({ "templates": templates }))
+            }
+            Err(e) => err("INTERNAL", e.to_string(), "Check the vault path."),
+        }
+    }
+
+    #[tool(
+        description = "Create a note from a template (auto-committed, versioned, audited). Substitution happens before YAML parsing, so numeric vars stay typed. Returns a version_id."
+    )]
+    async fn create_from_template(
+        &self,
+        Parameters(args): Parameters<CreateFromTemplateArgs>,
+    ) -> CallToolResult {
+        let raw = match TemplateStore::new(&self.vault).load_raw(&args.template) {
+            Ok(raw) => raw,
+            Err(e) => return err(&e.code, e.reason, &e.suggestion),
+        };
+        let mut vars = std::collections::HashMap::new();
+        if let Some(Value::Object(map)) = &args.vars {
+            for (k, v) in map {
+                let s = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => {
+                        return err(
+                            "INVALID_INPUT",
+                            format!("var {k:?} must be a scalar (string/number/bool)."),
+                            "Pass scalar values in vars.",
+                        )
+                    }
+                };
+                vars.insert(k.clone(), s);
+            }
+        }
+        let rendered = match render_template(&raw, &vars) {
+            Ok(r) => r,
+            Err(e) => return err(&e.code, e.reason, &e.suggestion),
+        };
+        let note = parse_note(&rendered, &format!("{}.md", args.note_id));
+        let frontmatter = match &note.frontmatter {
+            serde_yaml::Value::Mapping(m) if m.is_empty() => None,
+            fm => Some(fm.clone()),
+        };
+        let mut writer = self.writer.lock().expect("writer mutex poisoned");
+        match writer.create_note(&args.note_id, &note.content, frontmatter) {
+            Ok(result) => ok(json!({ "version_id": result.version_id, "note_id": args.note_id })),
+            Err(e) => err(&e.code, e.reason, &e.suggestion),
+        }
     }
 
     #[tool(description = "List available tools and the current permission scope.")]
