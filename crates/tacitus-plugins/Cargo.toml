@@ -1,0 +1,18 @@
+[package]
+name = "tacitus-plugins"
+description = "Sandboxed WASM plugin host for Tacitus — a plugin is an MCP client, and tacitus.call is the MCP contract inside the sandbox."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tacitus-core = { path = "../tacitus-core" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+wat.workspace = true

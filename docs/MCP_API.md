@@ -319,3 +319,6 @@ never guess.
 | `MISSING_VARS` | template placeholders left unfilled (listed in `reason`) |
 | `IO_ERROR` | filesystem failure (path/permissions) |
 | `INTERNAL` | unexpected server-side failure |
+| `INVALID_MANIFEST` | bad `tacitus-plugin.toml` (unknown tool, write tool under read-only scope, entry escape) |
+| `PLUGIN_ABI` | wasm guest broke ABI v1 (missing export, wrong version, non-JSON output) |
+| `PLUGIN_TRAP` | wasm guest crashed or exceeded its fuel/memory limits |

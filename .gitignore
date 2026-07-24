@@ -11,3 +11,6 @@ coverage/
 
 # Rust
 /target
+
+# example WASM guests build out-of-workspace
+examples/plugins/*/target/

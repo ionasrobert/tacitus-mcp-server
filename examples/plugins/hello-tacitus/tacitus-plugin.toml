@@ -1,0 +1,8 @@
+name = "hello-tacitus"
+version = "0.1.0"
+description = "Reference plugin: read-only vault digest of the top search hits for a query."
+entry = "hello_tacitus.wasm"
+
+[permissions]
+scope = "read-only"
+tools = ["search"]

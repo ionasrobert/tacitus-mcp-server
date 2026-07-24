@@ -113,6 +113,10 @@ public API, with permission scoping, versioning, and audit built in.
 
 - [docs/PLUGINS.md](./docs/PLUGINS.md) — integration guide: connect an agent,
   write a plugin in Python/TypeScript, embed the Rust engine, plugin patterns
+- **Sandboxed WASM plugins (experimental)** — crate `tacitus-plugins` runs
+  guest wasm under Wasmtime with manifest-declared permissions (tool allowlist
+  + scope), fuel and memory limits, no WASI: `tacitus.call` *is* `tools/call`.
+  See [docs/PLUGINS.md §5](./docs/PLUGINS.md#5-sandboxed-wasm-plugins-experimental)
 - [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 25 tools
   (params, returns, error codes)
 - Neural search (opt-in): `TACITUS_EMBEDDER=ollama` uses a local Ollama daemon
@@ -123,8 +127,9 @@ public API, with permission scoping, versioning, and audit built in.
   between devices (`tacitus-mcp sync init`)
 - [docs/DATA_FORMAT.md](./docs/DATA_FORMAT.md) — the on-disk format
   (`.tacitus/` internals, stable ids, note conventions)
-- [examples/](./examples/) — two complete zero-dependency plugins (Python
-  read-only analyzer, Node daily-note cron agent), tested against the binary
+- [examples/](./examples/) — three complete plugins (Python read-only
+  analyzer, Node daily-note cron agent, sandboxed WASM guest), tested against
+  the binary
 
 ## Semantic search (optional neural embeddings)
 

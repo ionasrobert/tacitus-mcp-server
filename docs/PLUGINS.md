@@ -171,10 +171,84 @@ present them to the user and `forget` the losers.
 5. **One writer at a time.** Don't run several uncoordinated mutating
    integrations against the same vault simultaneously.
 
-## Roadmap: sandboxed in-app plugins
+## 5. Sandboxed WASM plugins (experimental)
 
-A capability-scoped plugin host (WASM via Wasmtime + TS/Deno) is planned for
-the desktop app: manifest-declared permissions, no ambient filesystem access,
-UI extension points. **It does not exist yet** — everything above works today.
-If you build something, open an issue; real integrations will shape that
-design.
+The capability-scoped plugin host is real: crate `tacitus-plugins` runs a
+guest wasm module under Wasmtime with **manifest-declared permissions, no
+WASI, no ambient filesystem access**. The guest's only doors are two host
+functions — and the important one is the whole thesis in miniature:
+
+> **`tacitus.call` *is* `tools/call`.** A sandboxed plugin calls the same
+> tools, with the same argument shapes and the same `{ ok, data | error }`
+> envelope, as any MCP agent. Capability scoping = a tool allowlist.
+
+### Manifest — `tacitus-plugin.toml`
+
+A plugin is a directory under `<vault>/.tacitus/plugins/<name>/` (directory
+name must equal the manifest `name`):
+
+```toml
+name = "hello-tacitus"            # ^[a-z0-9][a-z0-9-]*$
+version = "0.1.0"
+description = "Read-only vault digest."
+entry = "hello_tacitus.wasm"      # relative to this file; ".." rejected
+
+[permissions]
+scope = "read-only"               # "read-only" | "read-write"
+tools = ["search"]                # exact allowlist; anything else → PERMISSION_DENIED
+```
+
+Validation happens at load, before any wasm compiles: unknown tools, write
+tools under `scope = "read-only"`, and entry paths that escape the plugin
+directory are all `INVALID_MANIFEST` with an actionable suggestion.
+
+### ABI v1
+
+Payloads are UTF-8 JSON in guest linear memory, addressed as `(ptr << 32) |
+len` packed into an `i64`.
+
+| Guest exports | Signature | Contract |
+|---|---|---|
+| `memory` | memory | the linear memory |
+| `tacitus_abi_version` | `() -> i32` | must return `1` |
+| `tacitus_alloc` | `(len: i32) -> i32` | pointer to `len` writable bytes |
+| `tacitus_dealloc` | `(ptr: i32, len: i32)` | free (a no-op is fine) |
+| `tacitus_run` | `(ptr: i32, len: i32) -> i64` | entry point; input `{"input": …, "plugin": {name, version}}`; returns packed ptr/len of a `{ok, data\|error}` envelope |
+
+| Host imports (module `"tacitus"`) | Signature | Contract |
+|---|---|---|
+| `call` | `(tool_ptr, tool_len, args_ptr, args_len: i32) -> i64` | run an allowlisted tool; **always** returns an envelope — denial is `PERMISSION_DENIED` data, never a trap |
+| `log` | `(level: i32, ptr: i32, len: i32)` | 0=debug 1=info 2=warn 3=error; captured by the host |
+
+Tools reachable in the sandbox today (a curated subset of the server's
+contract; the full registry is on the roadmap): `capabilities`, `search`,
+`get_note`, `list_notes`, `graph_query`, `list_tasks`, `properties_query`,
+`recall` (read) · `create_note`, `update_note`, `remember` (write, need
+`scope = "read-write"`). Writes go through the same transactional
+`NoteWriter` as every agent — versioned, audited, revertible.
+
+### Limits (host policy — a manifest can never raise them)
+
+Each `run()` gets a deterministic **fuel** budget (default 10⁹ instructions)
+and the guest's linear memory is capped (default 64 MiB). A runaway or
+crashing guest surfaces as a structured `PLUGIN_TRAP`; a protocol violation
+(missing export, wrong ABI version, non-JSON output) as `PLUGIN_ABI`.
+
+### Try it
+
+The reference guest lives at
+[`examples/plugins/hello-tacitus/`](../examples/plugins/hello-tacitus/) —
+ABI v1 by hand in ~100 lines of Rust, no SDK:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path examples/plugins/hello-tacitus/Cargo.toml
+cargo run -p tacitus-plugins --example run_plugin -- \
+  /path/to/vault examples/plugins/hello-tacitus '{"query":"launch"}'
+```
+
+Roadmap from here: the full tool registry shared with the MCP server, a
+`tacitus-mcp plugin run|list` CLI, desktop integration with permission-consent
+UI, lifecycle hooks (`on_note_saved`), and a TS/Deno host. If you build
+something, open an issue — real integrations shape this design.

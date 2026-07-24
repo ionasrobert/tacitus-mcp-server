@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ionasrobert/tacitus-mcp-server"
@@ -38,6 +38,18 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# WASM plugin host (tacitus-plugins — a LIBRARY crate, deliberately not part
+# of the shipped tacitus-mcp binary). wasmtime with default features OFF:
+# `cache` would pull the zstd C library and `async` the fiber stack — we keep
+# the tree lean (guarded in CI). The `runtime` feature does need a small cc
+# shim (helpers.c), same class as ring's build (already in the binary tree),
+# so it cross-compiles fine — but wiring plugins INTO the dist binary is an
+# m3 decision to measure first. Major is pinned; wasmtime majors bump monthly,
+# so bumps are routine and confined to host.rs/abi.rs.
+wasmtime = { version = "47", default-features = false, features = ["runtime", "cranelift"] }
+toml = "1"
+# WAT text → wasm bytes, test-only: host fixtures stay reviewable text.
+wat = "1"
 
 # The profile that 'dist' will build with
 [profile.dist]
