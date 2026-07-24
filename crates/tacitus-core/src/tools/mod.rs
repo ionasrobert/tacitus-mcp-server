@@ -288,6 +288,21 @@ impl ToolRegistry {
         self
     }
 
+    /// Replace the internal writer — the seam for embedders like the desktop
+    /// app that want plugin writes reflected into a shared LIVE index
+    /// (`NoteWriter::with_index`) and attributed in the audit log
+    /// (`set_origin`). The writer's scope is the enforcement point, so it
+    /// should match this registry's scope; `PluginHost::load_with_registry`
+    /// verifies that against the manifest.
+    pub fn with_writer(mut self, writer: NoteWriter) -> Self {
+        self.writer = Mutex::new(writer);
+        self
+    }
+
+    pub fn scope(&self) -> PermissionScope {
+        self.scope
+    }
+
     pub fn descriptors() -> &'static [ToolDescriptor] {
         TOOLS
     }

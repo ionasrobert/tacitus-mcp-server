@@ -135,6 +135,66 @@ fn guest_write_tool_flows_through_readwrite_manifest() {
 }
 
 #[test]
+fn load_with_registry_live_index_and_origin() {
+    use std::sync::{Arc, Mutex};
+    use tacitus_core::vault::{NoteWriter, VaultIndex};
+    use tacitus_plugins::ToolRegistry;
+
+    let vault_dir = vault("liveidx");
+    let plugin = plugin_dir_scoped("liveidx", CALL_CREATE_NOTE, &["create_note"], "read-write");
+    let index = Arc::new(Mutex::new(VaultIndex::build(&vault_dir).unwrap()));
+
+    let host = PluginHost::new(HostConfig::default()).unwrap();
+    let index_for_writer = index.clone();
+    let vault_for_writer = vault_dir.clone();
+    let mut instance = host
+        .load_with_registry(&plugin, move |manifest| {
+            let mut writer = NoteWriter::with_index(
+                &vault_for_writer,
+                manifest.permissions.scope,
+                index_for_writer,
+            );
+            writer.set_origin(format!("plugin:{}", manifest.name));
+            ToolRegistry::standard(&vault_for_writer, manifest.permissions.scope)
+                .with_writer(writer)
+        })
+        .unwrap();
+
+    let out = instance.run(&json!({})).unwrap();
+    assert_eq!(out["ok"], true, "guest write failed: {out}");
+    // The SHARED index saw the write without any rebuild…
+    assert!(
+        index.lock().unwrap().get("notes/from-guest").is_some(),
+        "live index refreshed"
+    );
+    // …and the audit log attributes it to the plugin.
+    let audit = fs::read_to_string(vault_dir.join(".tacitus/audit.log")).unwrap();
+    assert!(
+        audit.contains("\"origin\":\"plugin:fixture\""),
+        "origin attributed: {audit}"
+    );
+}
+
+#[test]
+fn load_with_registry_rejects_scope_mismatch() {
+    use tacitus_core::vault::PermissionScope;
+    use tacitus_plugins::ToolRegistry;
+
+    let vault_dir = vault("scopeguard");
+    // Manifest says read-only, but the caller builds a read-write registry —
+    // that would silently widen the plugin's privileges.
+    let plugin = plugin_dir_scoped("scopeguard", ECHO, &[], "read-only");
+    let host = PluginHost::new(HostConfig::default()).unwrap();
+    let e = host
+        .load_with_registry(&plugin, |_manifest| {
+            ToolRegistry::standard(&vault_dir, PermissionScope::ReadWrite)
+        })
+        .unwrap_err();
+    assert_eq!(e.code, "INTERNAL");
+    assert!(e.reason.contains("scope"), "names the mismatch: {e}");
+}
+
+#[test]
 fn guest_call_undeclared_tool_gets_envelope_not_trap() {
     let host = PluginHost::new(HostConfig::default()).unwrap();
     let mut plugin = host

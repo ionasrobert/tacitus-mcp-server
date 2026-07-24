@@ -494,3 +494,31 @@ fn dispatch_no_arg_tools_accept_empty_args() {
     assert_eq!(out["ok"], true);
     let _unused: Value = out;
 }
+
+#[test]
+fn with_writer_reflects_into_live_index_and_attributes_origin() {
+    let vault = temp_vault("livewriter");
+    let index = std::sync::Arc::new(std::sync::Mutex::new(VaultIndex::build(&vault).unwrap()));
+    let mut writer = NoteWriter::with_index(&vault, PermissionScope::ReadWrite, index.clone());
+    writer.set_origin("plugin:fixture");
+    let reg = ToolRegistry::standard(&vault, PermissionScope::ReadWrite).with_writer(writer);
+    assert_eq!(reg.scope(), PermissionScope::ReadWrite);
+
+    let out = reg.dispatch(
+        "create_note",
+        &json!({ "note_id": "notes/live", "content": "written by a plugin" }),
+        None,
+    );
+    assert_eq!(out["ok"], true, "create failed: {out}");
+    // The SHARED index sees the note without any rebuild.
+    assert!(
+        index.lock().unwrap().get("notes/live").is_some(),
+        "live index refreshed by the injected writer"
+    );
+    // And the audit log attributes the write.
+    let audit = fs::read_to_string(vault.join(".tacitus/audit.log")).unwrap();
+    assert!(
+        audit.contains("\"origin\":\"plugin:fixture\""),
+        "origin attributed: {audit}"
+    );
+}

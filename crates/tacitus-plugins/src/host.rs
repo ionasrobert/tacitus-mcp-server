@@ -92,6 +92,25 @@ impl PluginHost {
     /// The registry is scoped by the manifest (scope constructs the
     /// `NoteWriter`, allowlist gates every `tacitus.call`).
     pub fn load(&self, plugin_dir: &Path, vault: &Path) -> Result<PluginInstance, TacitusError> {
+        let vault = vault.to_path_buf();
+        self.load_with_registry(plugin_dir, move |manifest| {
+            ToolRegistry::standard(&vault, manifest.permissions.scope)
+                .with_identity("tacitus-plugins", env!("CARGO_PKG_VERSION"))
+        })
+    }
+
+    /// Like [`Self::load`], but the caller builds the registry — the seam for
+    /// embedders (e.g. the desktop app) that inject a `NoteWriter` wired to a
+    /// live index and an audit origin. The closure receives the validated
+    /// manifest; the returned registry's scope MUST equal the manifest's
+    /// scope — the writer is the enforcement point, so a broader registry
+    /// would silently widen the plugin's privileges. That mismatch is an
+    /// error here, not a foot-gun.
+    pub fn load_with_registry(
+        &self,
+        plugin_dir: &Path,
+        make_registry: impl FnOnce(&PluginManifest) -> ToolRegistry,
+    ) -> Result<PluginInstance, TacitusError> {
         let manifest = PluginManifest::load(plugin_dir)?;
         manifest.validate(ToolRegistry::descriptors())?;
         let wasm_path = manifest.wasm_path(plugin_dir)?;
@@ -109,11 +128,21 @@ impl PluginHost {
             )
         })?;
 
+        let registry = make_registry(&manifest);
+        if registry.scope() != manifest.permissions.scope {
+            return Err(TacitusError::new(
+                "INTERNAL",
+                format!(
+                    "Registry scope {:?} does not match the manifest's scope {:?}.",
+                    registry.scope(),
+                    manifest.permissions.scope
+                ),
+                "Construct the registry (and its writer) with the manifest's scope.",
+            ));
+        }
+
         let state = PluginState {
-            registry: Arc::new(
-                ToolRegistry::standard(vault, manifest.permissions.scope)
-                    .with_identity("tacitus-plugins", env!("CARGO_PKG_VERSION")),
-            ),
+            registry: Arc::new(registry),
             allowlist: manifest.permissions.tools.iter().cloned().collect(),
             logs: Vec::new(),
             limits: StoreLimitsBuilder::new()
