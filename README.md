@@ -72,9 +72,10 @@ Then point any MCP client at the binary instead of `npx`:
 claude mcp add tacitus -- tacitus-mcp /path/to/your/vault
 ```
 
-The native and npm servers are feature-identical (same 16 tools) and share the
-same on-disk formats, so a vault works with either. Set
-`TACITUS_SCOPE=read-only` to run the native server without write permissions.
+The native binary is the flagship server (23 tools; the npm server has the
+core 16 — see the table below). Both share the same on-disk formats, so a
+vault works with either. Set `TACITUS_SCOPE=read-only` to run the native
+server without write permissions.
 
 ## Tools
 
@@ -136,8 +137,8 @@ your-vault/
 Polyglot monorepo. The reference server (shipped on npm) is TypeScript in
 `packages/mcp-server`. A **native Rust server** in `crates/` provides a
 single-binary, zero-runtime-deps build (`crates/tacitus-core` engine +
-`crates/tacitus-mcp` rmcp server) at feature parity with the TS server — same 16
-tools. Its `stable_id` matches the TS engine byte-for-byte, so memory ids are
+`crates/tacitus-mcp` rmcp server) — a superset of the TS server (23 vs 16
+tools). Its `stable_id` matches the TS engine byte-for-byte, so memory ids are
 identical across both engines.
 
 ```bash
