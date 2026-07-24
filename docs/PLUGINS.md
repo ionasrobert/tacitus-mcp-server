@@ -264,6 +264,16 @@ cargo run -p tacitus-plugins --example run_plugin -- \
   /path/to/vault examples/plugins/hello-tacitus '{"query":"launch"}'
 ```
 
+### Plugin registry
+
+[`registry/plugins.json`](../registry/plugins.json) is the public plugin
+index (served raw from this repo; the desktop app reads it). Each entry lists
+display metadata plus the plugin's files as `{path, url, sha256}` — installers
+verify every hash and then validate the downloaded manifest locally, so the
+registry can never grant more than the manifest the user approves. To publish
+a plugin: host your `.wasm` + `tacitus-plugin.toml` at stable URLs (e.g. a
+GitHub release) and open a PR adding an entry.
+
 ### In the desktop app
 
 The Tacitus desktop app runs these plugins natively: it discovers
