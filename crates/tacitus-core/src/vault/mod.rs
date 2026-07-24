@@ -26,7 +26,7 @@ pub use template::{render_template, template_vars, Template, TemplateStore};
 pub use types::{Heading, Note, WikiLink};
 pub use write::{
     AuditEntry, ChangeOp, Changeset, CommitResult, DiffEntry, NoteWriter, PermissionScope,
-    Proposal, RevertResult,
+    Proposal, RevertResult, VersionDetail, VersionNoteChange,
 };
 
 #[cfg(test)]

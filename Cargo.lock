@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "regex",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rmcp",
  "schemars",

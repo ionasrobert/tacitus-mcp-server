@@ -83,7 +83,7 @@ server without write permissions.
 |---|---|
 | **Memory** | `remember`, `recall`, `forget` |
 | **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes`, `properties_query`* |
-| **Write-back** | `propose_changes`, `commit_changes`, `revert`, `rename_note`*, `delete_note`* |
+| **Write-back** | `propose_changes`, `commit_changes`, `revert`, `rename_note`*, `delete_note`*, `get_version`* |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
 | **Templates** | `list_templates`*, `create_from_template`* |
 | **Tasks** | `list_tasks`*, `toggle_task`* |

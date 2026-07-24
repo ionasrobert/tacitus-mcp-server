@@ -125,6 +125,24 @@ pub struct AuditEntry {
     pub scope: PermissionScope,
 }
 
+/// One note's change inside a committed version (from the history snapshot).
+#[derive(Clone, Debug, Serialize)]
+pub struct VersionNoteChange {
+    pub note_id: String,
+    /// "created" | "updated" | "deleted"
+    pub op: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// A committed version, fully expanded — what changed, note by note.
+#[derive(Clone, Debug, Serialize)]
+pub struct VersionDetail {
+    pub version_id: String,
+    pub change_id: String,
+    pub notes: Vec<VersionNoteChange>,
+}
+
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -430,6 +448,49 @@ impl NoteWriter {
         entries.reverse();
         entries.truncate(limit);
         Ok(entries)
+    }
+
+    /// Expand a committed version's snapshot: per-note before/after (Part I.7
+    /// observability — see WHAT an agent changed, not just that it did).
+    pub fn get_version(&self, version_id: &str) -> Result<VersionDetail, TacitusError> {
+        let raw = read_raw_or_null(&self.history_dir.join(format!("{version_id}.json")))?
+            .ok_or_else(|| {
+                TacitusError::new(
+                    "UNKNOWN_VERSION",
+                    format!("No version with id \"{version_id}\"."),
+                    "Use a version_id from audit_log.",
+                )
+            })?;
+        let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|e| {
+            TacitusError::new(
+                "INTERNAL",
+                e.to_string(),
+                "The history snapshot is corrupt.",
+            )
+        })?;
+        let notes = snapshot
+            .before
+            .iter()
+            .map(|(note_id, before)| {
+                let after = snapshot.after.get(note_id).cloned().flatten();
+                let op = match (before.is_some(), after.is_some()) {
+                    (false, true) => "created",
+                    (true, false) => "deleted",
+                    _ => "updated",
+                };
+                VersionNoteChange {
+                    note_id: note_id.clone(),
+                    op: op.to_string(),
+                    before: before.clone(),
+                    after,
+                }
+            })
+            .collect();
+        Ok(VersionDetail {
+            version_id: snapshot.version_id,
+            change_id: snapshot.change_id,
+            notes,
+        })
     }
 
     fn append_audit(&self, entry: &AuditEntry) -> Result<(), TacitusError> {
@@ -744,6 +805,58 @@ mod tests {
         assert_eq!(
             index.lock().unwrap().get("live").map(|n| n.title.clone()),
             Some("live".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn get_version_classifies_created_updated_deleted() {
+        let dir = temp_vault("getversion");
+        fs::write(dir.join("edit.md"), "OLD\n").unwrap();
+        fs::write(dir.join("gone.md"), "BYE\n").unwrap();
+        let mut writer = NoteWriter::new(&dir, PermissionScope::ReadWrite);
+        let proposal = writer
+            .propose(Changeset {
+                ops: vec![
+                    ChangeOp::Create {
+                        note_id: "fresh".into(),
+                        content: "NEW".into(),
+                        frontmatter: None,
+                    },
+                    ChangeOp::Update {
+                        note_id: "edit".into(),
+                        content: Some("CHANGED".into()),
+                        frontmatter: None,
+                    },
+                    ChangeOp::Delete {
+                        note_id: "gone".into(),
+                    },
+                ],
+            })
+            .unwrap();
+        let version = writer.commit(&proposal.change_id).unwrap().version_id;
+
+        let detail = writer.get_version(&version).unwrap();
+        assert_eq!(detail.version_id, version);
+        let op_of = |id: &str| {
+            detail
+                .notes
+                .iter()
+                .find(|n| n.note_id == id)
+                .unwrap()
+                .op
+                .clone()
+        };
+        assert_eq!(op_of("fresh"), "created");
+        assert_eq!(op_of("edit"), "updated");
+        assert_eq!(op_of("gone"), "deleted");
+        let edit = detail.notes.iter().find(|n| n.note_id == "edit").unwrap();
+        assert!(edit.before.as_deref().unwrap().contains("OLD"));
+        assert!(edit.after.as_deref().unwrap().contains("CHANGED"));
+
+        assert_eq!(
+            writer.get_version("v_nope").unwrap_err().code,
+            "UNKNOWN_VERSION"
         );
         fs::remove_dir_all(&dir).ok();
     }

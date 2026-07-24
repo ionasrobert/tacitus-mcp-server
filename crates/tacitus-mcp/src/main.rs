@@ -190,6 +190,16 @@ struct RenameNoteArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct GetVersionArgs {
+    /// A version_id from audit_log / commit_changes.
+    version_id: String,
+    /// Include each note's before/after contents (default: false = ops only).
+    include_content: Option<bool>,
+    /// Approximate token ceiling per included content (default 500).
+    max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct DeleteNoteArgs {
     note_id: String,
 }
@@ -736,6 +746,41 @@ impl TacitusServer {
             Ok(result) => ok(json!({ "version_id": result.version_id })),
             Err(e) => err(&e.code, e.reason, &e.suggestion),
         }
+    }
+
+    #[tool(
+        description = "Inspect a committed version: which notes it created/updated/deleted (default), plus each note's before/after when include_content=true (truncated to max_tokens each, default 500). Pairs with audit_log and revert."
+    )]
+    async fn get_version(&self, Parameters(args): Parameters<GetVersionArgs>) -> CallToolResult {
+        let writer = self.writer.lock().expect("writer mutex poisoned");
+        let detail = match writer.get_version(&args.version_id) {
+            Ok(d) => d,
+            Err(e) => return err(&e.code, e.reason, &e.suggestion),
+        };
+        let include = args.include_content.unwrap_or(false);
+        let max_chars = args.max_tokens.unwrap_or(500) * 4;
+        let clip = |text: &Option<String>| -> Value {
+            match text {
+                None => Value::Null,
+                Some(t) if include => {
+                    let clipped: String = t.chars().take(max_chars).collect();
+                    json!({ "content": clipped, "truncated": t.chars().count() > max_chars })
+                }
+                Some(_) => Value::Null,
+            }
+        };
+        let notes: Vec<Value> = detail
+            .notes
+            .iter()
+            .map(|n| {
+                json!({ "note_id": n.note_id, "op": n.op, "before": clip(&n.before), "after": clip(&n.after) })
+            })
+            .collect();
+        ok(json!({
+            "version_id": detail.version_id,
+            "change_id": detail.change_id,
+            "notes": notes,
+        }))
     }
 
     #[tool(description = "List available tools and the current permission scope.")]
