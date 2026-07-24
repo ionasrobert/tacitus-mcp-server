@@ -6,6 +6,9 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
+use tacitus_core::vault::NoteWriter;
+
+use crate::apply::ApplyReport;
 use crate::engine::SyncEngine;
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::SyncError;
@@ -107,19 +110,38 @@ pub async fn run_once(engine: &mut SyncEngine, relay_url: &str) -> Result<RunRep
     Ok(report)
 }
 
+#[derive(Debug, Default)]
+pub struct PassReport {
+    pub run: RunReport,
+    pub apply: ApplyReport,
+}
+
+/// One complete pass: exchange updates with the relay, then materialize the
+/// merged state into the vault through the transactional writer.
+pub async fn sync_pass(
+    engine: &mut SyncEngine,
+    writer: &mut NoteWriter,
+    relay_url: &str,
+) -> Result<PassReport, SyncError> {
+    let run = run_once(engine, relay_url).await?;
+    let apply = engine.apply_dirty(writer, &run.dirty_items)?;
+    Ok(PassReport { run, apply })
+}
+
 /// Sync forever: a pass now, then one every `interval`, reconnecting on
-/// failure with a fixed backoff. Returns only on an unrecoverable error.
+/// network failure. Returns only on an unrecoverable error.
 pub async fn run_forever(
     engine: &mut SyncEngine,
+    writer: &mut NoteWriter,
     relay_url: &str,
     interval: Duration,
-    mut on_pass: impl FnMut(&RunReport),
+    mut on_pass: impl FnMut(&PassReport),
 ) -> Result<(), SyncError> {
     loop {
-        match run_once(engine, relay_url).await {
+        match sync_pass(engine, writer, relay_url).await {
             Ok(report) => on_pass(&report),
             Err(e) if e.code == "NETWORK" => {
-                eprintln!("sync: {e} — retrying in 30s");
+                eprintln!("sync: {e} — retrying on the next tick");
             }
             Err(e) => return Err(e),
         }

@@ -97,6 +97,17 @@ fn config_path(vault: &Path) -> PathBuf {
     vault.join(".tacitus").join("sync").join("config.json")
 }
 
+/// The writer sync applies remote batches through: read-write, and every
+/// commit marked origin "sync" in the audit log.
+fn sync_writer(vault: &Path) -> tacitus_core::vault::NoteWriter {
+    let mut writer = tacitus_core::vault::NoteWriter::new(
+        vault,
+        tacitus_core::vault::PermissionScope::ReadWrite,
+    );
+    writer.set_origin("sync");
+    writer
+}
+
 fn load_config(vault: &Path) -> Result<SyncConfig, String> {
     let raw = fs::read_to_string(config_path(vault))
         .map_err(|_| "sync is not set up for this vault — run `tacitus-mcp sync init` first")?;
@@ -150,13 +161,21 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
             let config = load_config(&vault)?;
             let code = VaultCode::parse(&config.vault_code).map_err(|e| e.to_string())?;
             let mut engine = SyncEngine::open(&vault, &code).map_err(|e| e.to_string())?;
-            let report = client::run_once(&mut engine, &config.relay_url)
+            let mut writer = sync_writer(&vault);
+            let report = client::sync_pass(&mut engine, &mut writer, &config.relay_url)
                 .await
                 .map_err(|e| e.to_string())?;
             eprintln!(
-                "synced: pushed {} change set(s), applied {} remote update(s), cursor at {}",
-                report.pushed,
-                report.applied,
+                "synced: pushed {}, wrote {} note(s) + {} memory(ies){}, cursor at {}",
+                report.run.pushed,
+                report.apply.notes.len(),
+                report.apply.memories.len(),
+                report
+                    .apply
+                    .version_id
+                    .as_deref()
+                    .map(|v| format!(" (revertible: {v})"))
+                    .unwrap_or_default(),
                 engine.last_seq()
             );
             Ok(())
@@ -172,15 +191,18 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
                 "syncing {} every {interval_secs}s (Ctrl-C to stop)",
                 vault.display()
             );
+            let mut writer = sync_writer(&vault);
             client::run_forever(
                 &mut engine,
+                &mut writer,
                 &config.relay_url,
                 std::time::Duration::from_secs(interval_secs),
                 |report| {
-                    if report.pushed > 0 || report.applied > 0 {
+                    if report.run.pushed > 0 || !report.apply.notes.is_empty() {
                         eprintln!(
-                            "synced: pushed {}, applied {}",
-                            report.pushed, report.applied
+                            "synced: pushed {}, wrote {} note(s)",
+                            report.run.pushed,
+                            report.apply.notes.len()
                         );
                     }
                 },

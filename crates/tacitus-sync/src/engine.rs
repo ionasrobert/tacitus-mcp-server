@@ -41,12 +41,12 @@ pub struct EngineEffect {
 }
 
 pub struct SyncEngine {
-    sync_dir: PathBuf,
-    vault_dir: PathBuf,
+    pub(crate) sync_dir: PathBuf,
+    pub(crate) vault_dir: PathBuf,
     keys: Keys,
     device_id: String,
-    shadow: ShadowState,
-    docs: DocStore,
+    pub(crate) shadow: ShadowState,
+    pub(crate) docs: DocStore,
     outbox: Outbox,
     last_seq: u64,
 }

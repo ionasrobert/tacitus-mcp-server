@@ -54,6 +54,14 @@ pub enum ChangeOp {
     Delete {
         note_id: String,
     },
+    /// Set a note's raw file contents verbatim (None = delete). Byte-faithful
+    /// and tolerant: no create/update distinction, no conflict on existence —
+    /// this is the op the sync layer applies merged CRDT state with, where
+    /// last-merged-wins is the semantic and byte fidelity is the invariant.
+    SetRaw {
+        note_id: String,
+        raw: Option<String>,
+    },
 }
 
 impl ChangeOp {
@@ -61,7 +69,8 @@ impl ChangeOp {
         match self {
             ChangeOp::Create { note_id, .. }
             | ChangeOp::Update { note_id, .. }
-            | ChangeOp::Delete { note_id } => note_id,
+            | ChangeOp::Delete { note_id }
+            | ChangeOp::SetRaw { note_id, .. } => note_id,
         }
     }
 }
@@ -123,6 +132,10 @@ pub struct AuditEntry {
     pub change_id: Option<String>,
     pub notes: Vec<String>,
     pub scope: PermissionScope,
+    /// Who initiated the write when it wasn't a direct agent/tool call —
+    /// e.g. "sync". Absent for ordinary commits (backward compatible).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub origin: Option<String>,
 }
 
 /// One note's change inside a committed version (from the history snapshot).
@@ -203,6 +216,7 @@ pub struct NoteWriter {
     scope: PermissionScope,
     index: Option<Arc<Mutex<VaultIndex>>>,
     pending: HashMap<String, Changeset>,
+    origin: Option<String>,
 }
 
 impl NoteWriter {
@@ -237,7 +251,14 @@ impl NoteWriter {
             scope,
             index,
             pending: HashMap::new(),
+            origin: None,
         }
+    }
+
+    /// Mark every subsequent commit/revert in the audit log with an origin
+    /// (e.g. "sync"), distinguishing it from direct agent writes.
+    pub fn set_origin(&mut self, origin: impl Into<String>) {
+        self.origin = Some(origin.into());
     }
 
     fn note_path(&self, note_id: &str) -> PathBuf {
@@ -395,6 +416,7 @@ impl NoteWriter {
             change_id: Some(change_id.to_string()),
             notes: after.keys().cloned().collect(),
             scope: self.scope,
+            origin: self.origin.clone(),
         })?;
         self.pending.remove(change_id);
         Ok(CommitResult { version_id })
@@ -428,6 +450,7 @@ impl NoteWriter {
             change_id: None,
             notes: snapshot.before.keys().cloned().collect(),
             scope: self.scope,
+            origin: self.origin.clone(),
         })?;
         Ok(RevertResult {
             reverted: true,
@@ -555,6 +578,19 @@ impl NoteWriter {
                         op: "update".into(),
                         before: Some(before_raw),
                         after: Some(serialize(Some(&fm), &body)),
+                    });
+                }
+                ChangeOp::SetRaw { note_id, raw } => {
+                    let op = match (before.is_some(), raw.is_some()) {
+                        (false, true) => "create",
+                        (true, false) => "delete",
+                        _ => "update",
+                    };
+                    diff.push(DiffEntry {
+                        note_id: note_id.clone(),
+                        op: op.into(),
+                        before,
+                        after: raw.clone(),
                     });
                 }
                 ChangeOp::Delete { note_id } => {
@@ -935,6 +971,57 @@ mod tests {
         let mut writer = NoteWriter::new(&dir, PermissionScope::ReadOnly);
         let err = writer.create_note("a", "x", None).unwrap_err();
         assert_eq!(err.code, "PERMISSION_DENIED");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn setraw_writes_bytes_verbatim_and_is_versioned() {
+        let dir = temp_vault("setraw");
+        let mut writer = NoteWriter::new(&dir, PermissionScope::ReadWrite);
+        // Raw content with frontmatter, odd spacing, and a single trailing
+        // newline — must land on disk byte-for-byte, no reserialization.
+        let raw = "---\ntitle: Exact   # comment kept\n---\nbody line\n";
+        let proposal = writer
+            .propose(Changeset {
+                ops: vec![ChangeOp::SetRaw {
+                    note_id: "exact".into(),
+                    raw: Some(raw.into()),
+                }],
+            })
+            .unwrap();
+        let commit = writer.commit(&proposal.change_id).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("exact.md")).unwrap(), raw);
+
+        // SetRaw(None) deletes; revert of the delete restores the bytes.
+        let proposal = writer
+            .propose(Changeset {
+                ops: vec![ChangeOp::SetRaw {
+                    note_id: "exact".into(),
+                    raw: None,
+                }],
+            })
+            .unwrap();
+        let delete = writer.commit(&proposal.change_id).unwrap();
+        assert!(!dir.join("exact.md").exists());
+        writer.revert(&delete.version_id).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("exact.md")).unwrap(), raw);
+        let _ = commit;
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn audit_entry_origin_roundtrips_and_defaults_none() {
+        let dir = temp_vault("origin");
+        let mut writer = NoteWriter::new(&dir, PermissionScope::ReadWrite);
+        writer.create_note("plain", "no origin", None).unwrap();
+        writer.set_origin("sync");
+        writer.create_note("synced", "with origin", None).unwrap();
+
+        let audit = writer.read_audit(10).unwrap();
+        assert_eq!(audit[0].origin.as_deref(), Some("sync"));
+        assert_eq!(audit[1].origin, None);
+        // Old log lines (no origin field) still parse: default() covered by
+        // the entry written before set_origin.
         fs::remove_dir_all(&dir).ok();
     }
 }

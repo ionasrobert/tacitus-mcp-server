@@ -115,6 +115,8 @@ public API, with permission scoping, versioning, and audit built in.
   write a plugin in Python/TypeScript, embed the Rust engine, plugin patterns
 - [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 25 tools
   (params, returns, error codes)
+- [docs/SYNC.md](./docs/SYNC.md) — **Sync (beta)**: E2E-encrypted CRDT sync
+  between devices (`tacitus-mcp sync init`)
 - [docs/DATA_FORMAT.md](./docs/DATA_FORMAT.md) — the on-disk format
   (`.tacitus/` internals, stable ids, note conventions)
 - [examples/](./examples/) — two complete zero-dependency plugins (Python

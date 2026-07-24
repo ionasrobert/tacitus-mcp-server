@@ -1449,7 +1449,7 @@ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
 name = "tacitus-core"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "regex",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-mcp"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "rmcp",
  "schemars",
@@ -1475,13 +1475,14 @@ dependencies = [
 
 [[package]]
 name = "tacitus-relay"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "axum",
  "base64",
  "futures-util",
  "serde",
  "serde_json",
+ "tacitus-core",
  "tacitus-sync",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -1491,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-sync"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "argon2",
  "base64",

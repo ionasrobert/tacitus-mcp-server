@@ -462,6 +462,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_two_vaults_converge_over_in_process_relay() {
+        use tacitus_core::vault::{NoteWriter, PermissionScope};
+        use tacitus_sync::{client, SyncEngine, VaultCode};
+        let url = spawn_relay(temp_dir("e2e-data")).await;
+
+        let va = temp_dir("e2e-va");
+        let vb = temp_dir("e2e-vb");
+        std::fs::write(va.join("plan.md"), "# Plan\n\nwritten on A\n").unwrap();
+        let code = VaultCode::generate();
+
+        let mut a = SyncEngine::open(&va, &code).unwrap();
+        let mut b = SyncEngine::open(&vb, &code).unwrap();
+        let mut wa = NoteWriter::new(&va, PermissionScope::ReadWrite);
+        let mut wb = NoteWriter::new(&vb, PermissionScope::ReadWrite);
+        wa.set_origin("sync");
+        wb.set_origin("sync");
+
+        // A pushes; B pulls — the FILE lands on B's disk, byte-identical.
+        client::sync_pass(&mut a, &mut wa, &url).await.unwrap();
+        let report = client::sync_pass(&mut b, &mut wb, &url).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(vb.join("plan.md")).unwrap(),
+            "# Plan\n\nwritten on A\n"
+        );
+
+        // The sync batch is revertible via the existing revert (audited).
+        let version_id = report.apply.version_id.expect("through NoteWriter");
+        let audit = wb.read_audit(1).unwrap();
+        assert_eq!(audit[0].origin.as_deref(), Some("sync"));
+        wb.revert(&version_id).unwrap();
+        assert!(!vb.join("plan.md").exists());
+
+        // B edits after re-pulling; the edit flows back to A's disk.
+        client::sync_pass(&mut b, &mut wb, &url).await.unwrap();
+        std::fs::write(vb.join("plan.md"), "# Plan\n\nwritten on A\nplus B\n").unwrap();
+        client::sync_pass(&mut b, &mut wb, &url).await.unwrap();
+        client::sync_pass(&mut a, &mut wa, &url).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(va.join("plan.md")).unwrap(),
+            "# Plan\n\nwritten on A\nplus B\n"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_malformed_vault_id_over_ws() {
         let url = spawn_relay(temp_dir("badid")).await;
         let mut ws = connect(&url).await;
