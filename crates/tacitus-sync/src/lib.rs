@@ -5,9 +5,13 @@
 //! merge them with remote updates; everything leaving the device is
 //! end-to-end encrypted, the relay only ever sees ciphertext.
 
+pub mod docs;
+pub mod manifest;
+pub mod merge;
 pub mod scan;
 pub mod state;
 
+pub use docs::{DocStore, MANIFEST_KEY};
 pub use scan::{scan, ItemKind, ScanDelta, ScanItem};
 pub use state::{ItemState, ShadowState};
 
