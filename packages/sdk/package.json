@@ -1,0 +1,48 @@
+{
+  "name": "@dashiro/tacitus-sdk",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client for the Tacitus MCP server — every tool as a typed method, structured errors, one import.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ionasrobert/tacitus-mcp-server.git",
+    "directory": "packages/sdk"
+  },
+  "keywords": [
+    "tacitus",
+    "mcp",
+    "model-context-protocol",
+    "sdk",
+    "client",
+    "pkm",
+    "agent-memory"
+  ]
+}

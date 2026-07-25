@@ -86,6 +86,10 @@ for hit in t.call("search", query="launch deadline", token_budget=300)["hits"]:
 
 ## 3. Write a plugin in TypeScript
 
+The typed route: [`@dashiro/tacitus-sdk`](../packages/sdk) wraps everything
+below — `TacitusClient.spawn({ vault })`, 25 typed methods, structured errors
+thrown as `TacitusToolError`. The raw MCP client, for reference:
+
 ```ts
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";

@@ -113,6 +113,13 @@ public API, with permission scoping, versioning, and audit built in.
 
 - [docs/PLUGINS.md](./docs/PLUGINS.md) — integration guide: connect an agent,
   write a plugin in Python/TypeScript, embed the Rust engine, plugin patterns
+- **TypeScript SDK** — [`@dashiro/tacitus-sdk`](./packages/sdk): every tool as
+  a typed method, `{code, reason, suggestion}` errors thrown as
+  `TacitusToolError`:
+  ```ts
+  const tacitus = await TacitusClient.spawn({ vault: '/path/to/vault' });
+  const hits = await tacitus.search({ query: 'client X', token_budget: 500 });
+  ```
 - **Sandboxed WASM plugins (experimental)** — crate `tacitus-plugins` runs
   guest wasm under Wasmtime with manifest-declared permissions (tool allowlist
   + scope), fuel and memory limits, no WASI: `tacitus.call` *is* `tools/call`.
