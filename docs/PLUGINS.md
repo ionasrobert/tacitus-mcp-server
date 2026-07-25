@@ -274,6 +274,24 @@ registry can never grant more than the manifest the user approves. To publish
 a plugin: host your `.wasm` + `tacitus-plugin.toml` at stable URLs (e.g. a
 GitHub release) and open a PR adding an entry.
 
+### From the CLI (cron agents, scripts)
+
+The native binary embeds the plugin runtime (build with
+`--no-default-features` for a lean server without it):
+
+```sh
+tacitus-mcp plugin list [--vault <path>]
+tacitus-mcp plugin run <name> [--vault <path>] [--input '<json>'] [--timeout-ms <n>]
+# cron: 0 7 * * * tacitus-mcp plugin run daily-digest --vault ~/vault
+```
+
+`run` prints the `{ ok, data | error }` envelope on stdout, guest logs on
+stderr, and exits 0 only on `ok: true` — cron-friendly. Consent model:
+invoking a plugin from the terminal IS the consent, exactly like running any
+script; the manifest's scope still gates writes, and every write is audited
+as `plugin:<name>`, versioned and revertible. (The desktop app adds a stored
+approval flow because there plugins can also run automatically on hooks.)
+
 ### In the desktop app
 
 The Tacitus desktop app runs these plugins natively: it discovers
@@ -285,6 +303,6 @@ sandbox described above; writes land in the app's live index instantly and
 appear in the Activity tab attributed as `plugin:<name>`, diffable and
 revertible like any agent write.
 
-Roadmap from here: a `tacitus-mcp plugin run|list` CLI, lifecycle hooks
-(`on_note_saved`), and a TS/Deno host. If you build something, open an issue —
-real integrations shape this design.
+Roadmap from here: version upgrades in the store, per-author signing, and a
+TS/Deno host. If you build something, open an issue — real integrations shape
+this design.

@@ -25,6 +25,8 @@ use tacitus_core::tools::args::{
 use tacitus_core::tools::ToolRegistry;
 use tacitus_core::vault::{HashingEmbedder, PermissionScope};
 
+#[cfg(feature = "plugins")]
+mod plugin_cli;
 mod sync_cli;
 
 /// The embedder for search/suggest tools. Default: the deterministic
@@ -252,8 +254,9 @@ impl TacitusServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `tacitus-mcp sync …` is the sync CLI; anything else is the MCP server
-    // with an optional vault path as the first argument (unchanged).
+    // `tacitus-mcp sync …` is the sync CLI, `tacitus-mcp plugin …` the plugin
+    // CLI; anything else is the MCP server with an optional vault path as the
+    // first argument (unchanged).
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("sync") {
         if let Err(e) = sync_cli::sync_main(&args[1..]).await {
@@ -261,6 +264,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("plugin") {
+        #[cfg(feature = "plugins")]
+        {
+            match plugin_cli::plugin_main(&args[1..]) {
+                Ok(true) => return Ok(()),
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("plugin: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        #[cfg(not(feature = "plugins"))]
+        {
+            eprintln!(
+                "plugin: this build lacks the plugins feature — rebuild with `--features plugins`."
+            );
+            std::process::exit(2);
+        }
     }
 
     let vault = args

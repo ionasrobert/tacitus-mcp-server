@@ -33,12 +33,17 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       # Lean-tree invariant: a wasmtime feature must never pull cmake or the
-      # zstd C library into the plugins tree (wasmtime's `cache` feature would;
-      # its `runtime` cc shim is fine — same class as ring's, already shipped).
-      - name: guard heavy C deps in tacitus-plugins
+      # zstd C library into the tree (wasmtime's `cache` feature would; its
+      # `runtime` cc shim is fine — same class as ring's, already shipped).
+      # Guarded on BOTH the plugins crate and the shipped binary (which now
+      # embeds the plugin runtime by default).
+      - name: guard heavy C deps (plugins + binary)
         run: |
           if cargo tree -p tacitus-plugins -e normal,build | grep -E ' (cmake|zstd)'; then
             echo "cmake/zstd dependency crept into tacitus-plugins" && exit 1
+          fi
+          if cargo tree -p tacitus-mcp -e normal,build | grep -E ' (cmake|zstd)'; then
+            echo "cmake/zstd dependency crept into tacitus-mcp" && exit 1
           fi
       # E2E: build the reference WASM guest and run the ignored test against it.
       - run: cargo build --release --target wasm32-unknown-unknown --manifest-path examples/plugins/hello-tacitus/Cargo.toml

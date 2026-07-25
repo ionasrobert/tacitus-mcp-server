@@ -116,6 +116,8 @@ public API, with permission scoping, versioning, and audit built in.
 - **Sandboxed WASM plugins (experimental)** — crate `tacitus-plugins` runs
   guest wasm under Wasmtime with manifest-declared permissions (tool allowlist
   + scope), fuel and memory limits, no WASI: `tacitus.call` *is* `tools/call`.
+  The native binary embeds the runtime: `tacitus-mcp plugin list|run` for cron
+  agents and scripts.
   See [docs/PLUGINS.md §5](./docs/PLUGINS.md#5-sandboxed-wasm-plugins-experimental)
 - [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 25 tools
   (params, returns, error codes)

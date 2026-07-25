@@ -10,10 +10,21 @@ repository.workspace = true
 name = "tacitus-mcp"
 path = "src/main.rs"
 
+[features]
+# The WASM plugin runtime + `tacitus-mcp plugin list|run` CLI. Default ON:
+# one binary = vault server + plugin runtime (size/build cost measured and
+# acceptable; opt out with --no-default-features for a lean server).
+default = ["plugins"]
+plugins = ["dep:tacitus-plugins"]
+
 [dependencies]
 rmcp = { version = "2.2.0", features = ["server", "transport-io", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.151"
 tacitus-core = { path = "../tacitus-core", features = ["ollama", "schemas"] }
+tacitus-plugins = { path = "../tacitus-plugins", optional = true }
 tacitus-sync = { path = "../tacitus-sync", features = ["client"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }
+
+[dev-dependencies]
+wat.workspace = true
