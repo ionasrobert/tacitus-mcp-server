@@ -1150,7 +1150,7 @@ mod tests {
             feed_b
                 .awareness
                 .iter()
-                .any(|(note, data)| note == "doc" && data == &vec![1, 2, 3])
+                .any(|(note, data)| note == "doc" && data.as_slice() == [1, 2, 3])
         })
         .await;
         let mut feed_c = RoomFeed::default();
