@@ -82,6 +82,17 @@ nothing and a sync blob can never be replayed as presence. Departure is a
 Requires a 0.20+ relay; against an older relay presence is silently off
 (sync itself is unaffected — see compatibility below).
 
+## Co-editing (keystroke level)
+
+Two devices with the same note open co-edit live: keystroke updates (yjs
+v2) travel as ephemeral frames under their own AAD domain
+(`"{vault_id}#coedit"`), and a checkpointed diff lands in the durable log
+after ~2s of quiet — offline and third devices converge from the log alone,
+and a lost ephemeral frame is repaired by the next durable diff. Frames
+over 8 KiB (huge pastes) skip the fast tier and go durable immediately.
+Requires a 0.20+ relay; older peers ignore the frames (AEAD, like
+presence).
+
 ## Protocol (for relay implementers)
 
 WebSocket, JSON text frames, blobs base64. Client → `hello {vault_id,

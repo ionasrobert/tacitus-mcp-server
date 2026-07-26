@@ -239,6 +239,11 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
                         LiveEvent::Disconnected { reason, retry_in } => {
                             eprintln!("disconnected: {reason} — retrying in {retry_in:?}");
                         }
+                        // Rooms are a desktop concept — the CLI never opens
+                        // one, so these can't fire; ignore for totality.
+                        LiveEvent::RoomState { .. }
+                        | LiveEvent::CoeditUpdate { .. }
+                        | LiveEvent::CoeditAwareness { .. } => {}
                         LiveEvent::Peers(peers) => {
                             if peers.is_empty() {
                                 eprintln!("no other devices online");

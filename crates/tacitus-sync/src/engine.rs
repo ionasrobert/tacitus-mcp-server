@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use yrs::StateVector;
+
+use crate::coedit::{coedit_aad, CoeditKind, CoeditPayload};
 use crate::crypto::{self, DocUpdate, Keys, SyncPayload, VaultCode};
 use crate::docs::DocStore;
 use crate::outbox::Outbox;
@@ -34,11 +37,13 @@ pub struct Flag {
 
 /// What a server message produced: messages to send back, items whose
 /// materialized content changed (the apply layer rewrites those files),
-/// and anything worth surfacing to a human.
+/// the raw applied updates (a live room forwards its note's bytes to the
+/// frontend doc), and anything worth surfacing to a human.
 #[derive(Debug, Default)]
 pub struct EngineEffect {
     pub outbound: Vec<ClientMsg>,
     pub dirty_items: Vec<String>,
+    pub updates: Vec<DocUpdate>,
     pub flagged: Vec<Flag>,
 }
 
@@ -208,6 +213,136 @@ impl SyncEngine {
         Ok(ClientMsg::Presence { blob })
     }
 
+    /// Seal a co-edit frame (keystroke update or awareness blob) for the
+    /// wire — rides the presence frame type under the `#coedit` AAD.
+    pub fn seal_coedit(
+        &self,
+        note_id: &str,
+        kind: CoeditKind,
+        data: &[u8],
+    ) -> Result<ClientMsg, SyncError> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let payload = CoeditPayload {
+            v: 1,
+            device: self.device_id.clone(),
+            ts,
+            note_id: note_id.to_string(),
+            kind,
+            data: data.to_vec(),
+        };
+        let blob = crypto::seal(
+            &self.keys.vault_key,
+            &coedit_aad(&self.keys.vault_id),
+            &payload,
+        )?;
+        Ok(ClientMsg::Presence { blob })
+    }
+
+    /// Decode a co-edit frame. `None` = our own echo, a presence/sync blob
+    /// (different AAD), or anything malformed — never fatal.
+    pub fn open_coedit(&self, blob: &[u8]) -> Option<CoeditPayload> {
+        let payload: CoeditPayload =
+            crypto::open(&self.keys.vault_key, &coedit_aad(&self.keys.vault_id), blob).ok()?;
+        (payload.device != self.device_id).then_some(payload)
+    }
+
+    /// Apply a peer's keystroke update to the note's doc and queue it for
+    /// materialization — same receipt guarantees as a durable Update (the
+    /// persisted apply queue survives a crash before the disk write).
+    pub fn apply_coedit_update(&mut self, note_id: &str, update: &[u8]) -> Result<(), SyncError> {
+        let key = format!("n:{note_id}");
+        self.docs
+            .apply_remote(&key, update)
+            .map_err(SyncError::io)?;
+        self.pending_apply.insert(key);
+        self.persist_pending_apply()
+    }
+
+    /// Seal + queue arbitrary doc updates for the durable log — the co-edit
+    /// checkpoint tier. Room updates enter docs via `apply_remote`, never
+    /// through `tick_scan`, so without this the log would never carry them
+    /// and fresh devices could not converge.
+    pub fn push_updates(&mut self, updates: Vec<DocUpdate>) -> Result<Vec<ClientMsg>, SyncError> {
+        if updates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let payload = SyncPayload {
+            v: 1,
+            device: self.device_id.clone(),
+            updates,
+        };
+        let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
+        self.outbox.push(blob.clone()).map_err(SyncError::io)?;
+        Ok(vec![ClientMsg::Push { blob }])
+    }
+
+    /// Prepare a co-editing room for a note. Returns the doc's full state
+    /// (the frontend bootstrap), the durable checkpoint, and — for a note
+    /// whose file was never scanned — the bootstrap push that puts the
+    /// baseline in the log. The caller must fold the disk first (the live
+    /// loop's fold-before invariant); this only bootstraps MISSING docs.
+    pub fn coedit_enter_state(
+        &mut self,
+        note_id: &str,
+    ) -> Result<(Vec<u8>, StateVector, Vec<ClientMsg>), SyncError> {
+        let key = format!("n:{note_id}");
+        let mut bootstrap = Vec::new();
+        if self
+            .docs
+            .full_state_of(&key)
+            .map_err(SyncError::io)?
+            .is_none()
+        {
+            let path = self.vault_dir.join(format!("{note_id}.md"));
+            let content = match fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(SyncError::io(e)),
+            };
+            let update = self
+                .docs
+                .apply_local_text(&key, &content)
+                .map_err(SyncError::io)?;
+            if !update.is_empty() {
+                bootstrap = self.push_updates(vec![DocUpdate {
+                    doc: key.clone(),
+                    u: update,
+                }])?;
+            }
+        }
+        let state = self
+            .docs
+            .full_state_of(&key)
+            .map_err(SyncError::io)?
+            .unwrap_or_default();
+        let checkpoint = self
+            .docs
+            .state_vector_of(&key)
+            .map_err(SyncError::io)?
+            .unwrap_or_default();
+        Ok((state, checkpoint, bootstrap))
+    }
+
+    /// The note's advance since `since` (the durable co-edit batch) and the
+    /// new checkpoint. Empty diff = nothing to push.
+    pub fn coedit_diff(
+        &mut self,
+        note_id: &str,
+        since: &StateVector,
+    ) -> Result<(Vec<u8>, StateVector), SyncError> {
+        let key = format!("n:{note_id}");
+        let diff = self.docs.diff_since(&key, since).map_err(SyncError::io)?;
+        let checkpoint = self
+            .docs
+            .state_vector_of(&key)
+            .map_err(SyncError::io)?
+            .unwrap_or_default();
+        Ok((diff, checkpoint))
+    }
+
     /// Decode a presence frame. `None` = our own echo, or anything that
     /// fails to authenticate or parse — presence is ephemeral, a bad frame
     /// is never worth killing a session over.
@@ -233,6 +368,15 @@ impl SyncEngine {
     /// Scan the vault; fold local changes into the CRDT docs; seal one
     /// payload and queue it. Returns the new push (if anything changed).
     pub fn tick_scan(&mut self) -> Result<Vec<ClientMsg>, SyncError> {
+        Ok(self.tick_scan_with_updates()?.0)
+    }
+
+    /// `tick_scan`, but also exposing the raw per-item updates that were
+    /// folded — the live loop forwards the room note's fold to its frontend
+    /// with exactly these bytes (no re-diff).
+    pub fn tick_scan_with_updates(
+        &mut self,
+    ) -> Result<(Vec<ClientMsg>, Vec<DocUpdate>), SyncError> {
         let delta = scan(&self.vault_dir, &mut self.shadow).map_err(SyncError::io)?;
         let mut updates: Vec<DocUpdate> = Vec::new();
 
@@ -260,16 +404,16 @@ impl SyncEngine {
         self.shadow.save(&self.sync_dir).map_err(SyncError::io)?;
 
         if updates.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let payload = SyncPayload {
             v: 1,
             device: self.device_id.clone(),
-            updates,
+            updates: updates.clone(),
         };
         let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
         self.outbox.push(blob.clone()).map_err(SyncError::io)?;
-        Ok(vec![ClientMsg::Push { blob }])
+        Ok((vec![ClientMsg::Push { blob }], updates))
     }
 
     pub fn on_server_msg(&mut self, msg: ServerMsg) -> Result<EngineEffect, SyncError> {
@@ -299,6 +443,7 @@ impl SyncEngine {
                             .map_err(SyncError::io)?;
                         effect.dirty_items.push(update.doc.clone());
                     }
+                    effect.updates = payload.updates;
                 }
                 // Queue before cursor: a crash in between redelivers the
                 // Update (idempotent); the other order loses it forever.
@@ -599,6 +744,193 @@ mod tests {
         assert!(b.open_presence(sync_blob).is_none());
         fs::remove_dir_all(&da).ok();
         fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn coedit_roundtrips_and_filters_own_echo() {
+        let da = temp_vault("coed-a");
+        let db = temp_vault("coed-b");
+        let code = VaultCode::generate();
+        let a = SyncEngine::open(&da, &code).unwrap();
+        let b = SyncEngine::open(&db, &code).unwrap();
+
+        let ClientMsg::Presence { blob } = a
+            .seal_coedit("projects/launch", CoeditKind::Update, &[7, 8, 9])
+            .unwrap()
+        else {
+            panic!("coedit rides the presence frame");
+        };
+        let payload = b.open_coedit(&blob).expect("decodes on B");
+        assert_eq!(payload.device, a.device_id());
+        assert_eq!(payload.note_id, "projects/launch");
+        assert_eq!(payload.kind, CoeditKind::Update);
+        assert_eq!(payload.data, vec![7, 8, 9]);
+        assert!(a.open_coedit(&blob).is_none(), "own echo → None");
+        let mut bad = blob.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
+        assert!(b.open_coedit(&bad).is_none());
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn presence_client_cannot_open_coedit_frames_and_vice_versa() {
+        // The 0.20-compat contract: a coedit blob fails the presence AAD
+        // (old clients swallow it silently), and no domain can read another.
+        let dir = temp_vault("coed-aad");
+        fs::write(dir.join("note.md"), "x\n").unwrap();
+        let code = VaultCode::generate();
+        let mut engine = SyncEngine::open(&dir, &code).unwrap();
+
+        let ClientMsg::Presence { blob: coedit_blob } = engine
+            .seal_coedit("note", CoeditKind::Update, &[1])
+            .unwrap()
+        else {
+            panic!("frame");
+        };
+        let ClientMsg::Presence {
+            blob: presence_blob,
+        } = engine
+            .seal_presence(&PresenceState::default(), false, false)
+            .unwrap()
+        else {
+            panic!("frame");
+        };
+        let pushes = engine.tick_scan().unwrap();
+        let ClientMsg::Push { blob: sync_blob } = &pushes[0] else {
+            panic!("push");
+        };
+
+        // Cross-domain opens on a SECOND device (own-echo filter would mask
+        // the AAD result on the sender).
+        let other_dir = temp_vault("coed-aad-b");
+        let other = SyncEngine::open(&other_dir, &code).unwrap();
+        assert!(other.open_presence(&coedit_blob).is_none());
+        assert!(other.open_coedit(&presence_blob).is_none());
+        assert!(other.open_coedit(sync_blob).is_none());
+        assert!(other.open_coedit(&coedit_blob).is_some(), "sanity");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other_dir).ok();
+    }
+
+    #[test]
+    fn apply_coedit_update_applies_and_queues_pending() {
+        let da = temp_vault("coed-apply-a");
+        let db = temp_vault("coed-apply-b");
+        fs::write(da.join("note.md"), "typed live\n").unwrap();
+        let code = VaultCode::generate();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let (_, updates) = a.tick_scan_with_updates().unwrap();
+        assert_eq!(updates.len(), 1);
+
+        {
+            let mut b = SyncEngine::open(&db, &code).unwrap();
+            b.apply_coedit_update("note", &updates[0].u).unwrap();
+            assert_eq!(
+                b.materialize("n:note").unwrap().as_deref(),
+                Some("typed live\n")
+            );
+            assert_eq!(b.pending_apply(), vec!["n:note"]);
+        }
+        // The receipt survives a crash, exactly like a durable Update.
+        let b = SyncEngine::open(&db, &code).unwrap();
+        assert_eq!(b.pending_apply(), vec!["n:note"]);
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn push_updates_lands_durably_and_converges_a_replica() {
+        let da = temp_vault("coed-push-a");
+        let db = temp_vault("coed-push-b");
+        fs::write(da.join("note.md"), "from the room\n").unwrap();
+        let code = VaultCode::generate();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let (_, updates) = a.tick_scan_with_updates().unwrap();
+        // Drain A's scan push so only push_updates' blob is in flight.
+        let mut relay = FakeRelay::default();
+        for msg in a.pending_pushes() {
+            relay.push(&msg);
+        }
+        a.on_server_msg(ServerMsg::Ack { seq: 1 }).unwrap();
+
+        let msgs = a.push_updates(updates).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(a.pending_pushes().len(), 1, "queued in the outbox");
+        let ack = relay.push(&msgs[0]);
+        a.on_server_msg(ack).unwrap();
+        assert!(a.pending_pushes().is_empty());
+
+        // A fresh device converges from the log alone.
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        for msg in relay.updates_since(0) {
+            b.on_server_msg(msg).unwrap();
+        }
+        assert_eq!(
+            b.materialize("n:note").unwrap().as_deref(),
+            Some("from the room\n")
+        );
+        // Empty input → no frame, no outbox growth.
+        assert!(a.push_updates(Vec::new()).unwrap().is_empty());
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn coedit_enter_state_bootstraps_missing_docs_durably() {
+        let dir = temp_vault("coed-enter");
+        fs::write(dir.join("draft.md"), "never scanned before\n").unwrap();
+        let code = VaultCode::generate();
+        let mut engine = SyncEngine::open(&dir, &code).unwrap();
+
+        // Never scanned → the enter bootstraps the doc AND pushes the
+        // baseline durably (the log must be able to replay the room).
+        let (state, checkpoint, bootstrap) = engine.coedit_enter_state("draft").unwrap();
+        assert!(!state.is_empty());
+        assert_eq!(bootstrap.len(), 1, "baseline pushed");
+        let ddir = temp_vault("coed-enter-replica");
+        let mut replica = SyncEngine::open(&ddir, &code).unwrap();
+        let ClientMsg::Push { blob } = &bootstrap[0] else {
+            panic!("push");
+        };
+        replica
+            .on_server_msg(ServerMsg::Update {
+                seq: 1,
+                blob: blob.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            replica.materialize("n:draft").unwrap().as_deref(),
+            Some("never scanned before\n")
+        );
+
+        // Re-enter: doc exists now → same state, NO new bootstrap push.
+        let before = engine.pending_pushes().len();
+        let (state2, _, bootstrap2) = engine.coedit_enter_state("draft").unwrap();
+        assert_eq!(state2, state);
+        assert!(bootstrap2.is_empty());
+        assert_eq!(engine.pending_pushes().len(), before);
+
+        // The checkpoint diff is empty until the doc advances.
+        let (diff, _) = engine.coedit_diff("draft", &checkpoint).unwrap();
+        assert!(diff.is_empty());
+        engine
+            .apply_coedit_update("draft", {
+                // Advance via a peer edit built on the replica.
+                replica
+                    .docs
+                    .apply_local_text("n:draft", "never scanned before\nplus a line\n")
+                    .unwrap()
+                    .as_slice()
+            })
+            .unwrap();
+        let (diff, new_checkpoint) = engine.coedit_diff("draft", &checkpoint).unwrap();
+        assert!(!diff.is_empty());
+        let (diff_after, _) = engine.coedit_diff("draft", &new_checkpoint).unwrap();
+        assert!(diff_after.is_empty(), "checkpoint advanced");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&ddir).ok();
     }
 
     #[test]

@@ -198,6 +198,32 @@ impl DocStore {
         Ok(update)
     }
 
+    /// Full compacted state of an item's doc (update v2 against the empty
+    /// state) — the room bootstrap blob. None if the item has no doc yet.
+    pub fn full_state_of(&mut self, item: &str) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.load(item)?.map(|doc| full_state(&doc)))
+    }
+
+    /// The item's current state vector — the durable-push checkpoint.
+    pub fn state_vector_of(&mut self, item: &str) -> io::Result<Option<StateVector>> {
+        Ok(self.load(item)?.map(|doc| doc.transact().state_vector()))
+    }
+
+    /// Everything the doc knows that `since` doesn't (update v2) — the
+    /// durable co-edit batch. Empty when nothing advanced or no doc.
+    pub fn diff_since(&mut self, item: &str, since: &StateVector) -> io::Result<Vec<u8>> {
+        match self.load(item)? {
+            Some(doc) => {
+                let txn = doc.transact();
+                if &txn.state_vector() == since {
+                    return Ok(Vec::new());
+                }
+                Ok(txn.encode_state_as_update_v2(since))
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Record a causal tombstone for the item; returns the manifest update.
     pub fn record_delete(&mut self, item: &str) -> io::Result<Vec<u8>> {
         let sv = match self.load(item)? {
@@ -266,6 +292,48 @@ impl DocStore {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn state_helpers_expose_full_state_vector_and_incremental_diff() {
+        let (dir, mut store) = temp_store("state-helpers");
+
+        // Nothing yet: no state, no vector, empty diff.
+        assert!(store.full_state_of("n:x").unwrap().is_none());
+        assert!(store.state_vector_of("n:x").unwrap().is_none());
+        assert!(store
+            .diff_since("n:x", &StateVector::default())
+            .unwrap()
+            .is_empty());
+
+        store.apply_local_text("n:x", "hello\n").unwrap();
+        let state = store.full_state_of("n:x").unwrap().expect("doc exists");
+        let checkpoint = store.state_vector_of("n:x").unwrap().unwrap();
+
+        // The full state reconstructs the text on a fresh replica.
+        let (rdir, mut replica) = temp_store("state-helpers-replica");
+        replica.apply_remote("n:x", &state).unwrap();
+        assert_eq!(
+            replica.materialize("n:x").unwrap().as_deref(),
+            Some("hello\n")
+        );
+
+        // Nothing advanced → empty diff.
+        assert!(store.diff_since("n:x", &checkpoint).unwrap().is_empty());
+
+        // Advance, then the diff-since-checkpoint carries ONLY the delta and
+        // brings the replica up to date.
+        store.apply_local_text("n:x", "hello\nworld\n").unwrap();
+        let diff = store.diff_since("n:x", &checkpoint).unwrap();
+        assert!(!diff.is_empty());
+        assert!(diff.len() < state.len() + 32, "a delta, not a re-send");
+        replica.apply_remote("n:x", &diff).unwrap();
+        assert_eq!(
+            replica.materialize("n:x").unwrap().as_deref(),
+            Some("hello\nworld\n")
+        );
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&rdir).ok();
+    }
 
     fn temp_store(tag: &str) -> (PathBuf, DocStore) {
         let nanos = SystemTime::now()

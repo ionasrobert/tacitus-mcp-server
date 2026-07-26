@@ -8,6 +8,7 @@
 pub mod apply;
 #[cfg(feature = "client")]
 pub mod client;
+pub mod coedit;
 pub mod crypto;
 pub mod docs;
 pub mod engine;
@@ -21,6 +22,7 @@ pub mod protocol;
 pub mod scan;
 pub mod state;
 
+pub use coedit::{CoeditKind, CoeditPayload};
 pub use crypto::{derive_keys, DocUpdate, Keys, SyncPayload, VaultCode};
 pub use docs::{DocStore, MANIFEST_KEY};
 pub use engine::{EngineEffect, Flag, SyncEngine};

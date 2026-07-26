@@ -17,13 +17,28 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 use tacitus_core::vault::NoteWriter;
+use yrs::StateVector;
 
 use crate::apply::ApplyReport;
 use crate::client::{ensure_crypto_provider, ws_url};
+use crate::coedit::CoeditKind;
+use crate::crypto::DocUpdate;
 use crate::engine::SyncEngine;
 use crate::presence::{Peer, PeerTracker, PresenceState};
 use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_PRESENCE};
 use crate::SyncError;
+
+/// The relay drops ephemeral frames whose base64 exceeds 8 KiB — anything
+/// bigger (huge paste) skips the fast tier and flushes durably instead.
+const MAX_COEDIT_FRAME_B64: usize = 8 * 1024;
+
+/// Would this frame survive the relay's ephemeral size cap?
+fn frame_fits(msg: &ClientMsg) -> bool {
+    match msg {
+        ClientMsg::Presence { blob } => blob.len().div_ceil(3) * 4 <= MAX_COEDIT_FRAME_B64,
+        _ => true,
+    }
+}
 
 /// Tunables for a live session. Every timing is injectable so tests never
 /// need fixed sleeps.
@@ -52,6 +67,10 @@ pub struct LiveConfig {
     /// Trailing debounce for state changes (rapid note switching collapses
     /// to the last state; hello-replies ride the same debounce).
     pub presence_debounce: Duration,
+    /// Trailing debounce for the durable co-edit checkpoint push — room
+    /// keystrokes travel ephemerally, then land in the relay log in one
+    /// batched diff after this much quiet.
+    pub coedit_durable_debounce: Duration,
 }
 
 impl LiveConfig {
@@ -68,6 +87,7 @@ impl LiveConfig {
             presence_interval: Duration::from_secs(15),
             presence_ttl: Duration::from_secs(45),
             presence_debounce: Duration::from_millis(300),
+            coedit_durable_debounce: Duration::from_secs(2),
         }
     }
 }
@@ -81,6 +101,15 @@ pub enum LiveCmd {
     /// Stored even while presence is off (old relay) — it lights up on the
     /// first capable session.
     Presence(PresenceState),
+    /// The host opened a note for co-editing: fold the disk, then hand the
+    /// frontend the doc's full state (`LiveEvent::RoomState`).
+    RoomEnter { note_id: String },
+    /// The room note closed — flush the durable checkpoint and forget.
+    RoomLeave,
+    /// A local keystroke batch from the frontend's binding (yjs update v2).
+    CoeditUpdate { note_id: String, update: Vec<u8> },
+    /// Local cursor/selection state (yjs awareness blob) — ephemeral only.
+    CoeditAwareness { note_id: String, data: Vec<u8> },
 }
 
 /// What the session surfaces to its host (status bar, CLI output).
@@ -104,6 +133,24 @@ pub enum LiveEvent {
     /// also re-emitted unconditionally after every reconnect so hosts can
     /// repaint. Empty when presence is off (old relay).
     Peers(Vec<Peer>),
+    /// The room's full doc state (update v2) — the frontend bootstrap.
+    /// Emitted on RoomEnter and re-emitted after every reconnect (apply is
+    /// idempotent).
+    RoomState {
+        note_id: String,
+        state: Vec<u8>,
+    },
+    /// A peer's keystroke batch — or a fold of an external disk write —
+    /// for the open room. Apply to the frontend doc with origin 'backend'.
+    CoeditUpdate {
+        note_id: String,
+        update: Vec<u8>,
+    },
+    /// A peer's cursor/selection blob for the open room.
+    CoeditAwareness {
+        note_id: String,
+        data: Vec<u8>,
+    },
 }
 
 /// Pure backoff progression: min on the first failure, doubling to max.
@@ -144,10 +191,15 @@ where
     Ok(None)
 }
 
-/// Fold local disk state into the CRDT and push whatever changed.
+/// Fold local disk state into the CRDT and push whatever changed. When a
+/// room is open, its note's folded bytes are forwarded to the frontend
+/// (external writers — plugins, agents, CLI — reach the binding this way),
+/// and the durable checkpoint advances past clean folds so the checkpoint
+/// tier doesn't re-log what the scan push just logged.
 async fn fold_and_push<S, F>(
     engine: &mut SyncEngine,
     sink: &mut S,
+    room: Option<&mut RoomCtx>,
     on_event: &mut F,
 ) -> Result<Option<String>, SyncError>
 where
@@ -155,7 +207,25 @@ where
     S::Error: std::fmt::Display,
     F: FnMut(LiveEvent),
 {
-    let pushes = engine.tick_scan()?;
+    let (pushes, updates) = engine.tick_scan_with_updates()?;
+    if let Some(room) = room {
+        let key = room.doc_key();
+        let mut folded_room = false;
+        for update in &updates {
+            if update.doc == key {
+                folded_room = true;
+                on_event(LiveEvent::CoeditUpdate {
+                    note_id: room.note_id.clone(),
+                    update: update.u.clone(),
+                });
+            }
+        }
+        if folded_room && !room.durable_dirty {
+            // The scan push already carries this fold durably.
+            let (_, checkpoint) = engine.coedit_diff(&room.note_id, &room.checkpoint)?;
+            room.checkpoint = checkpoint;
+        }
+    }
     if pushes.is_empty() {
         return Ok(None);
     }
@@ -194,6 +264,45 @@ struct PresenceCtx {
     peers: PeerTracker,
 }
 
+/// An open co-editing room: which note, and how far the durable log has
+/// been advanced (checkpoint). Survives reconnects.
+struct RoomCtx {
+    note_id: String,
+    checkpoint: StateVector,
+    /// Local room edits not yet flushed to the durable tier.
+    durable_dirty: bool,
+}
+
+impl RoomCtx {
+    fn doc_key(&self) -> String {
+        format!("n:{}", self.note_id)
+    }
+}
+
+/// Everything that outlives one connection, bundled.
+struct LiveState {
+    presence: PresenceCtx,
+    room: Option<RoomCtx>,
+}
+
+/// Push the room's advance-since-checkpoint into the durable log (outbox —
+/// crash-safe even when the returned frames can't be sent right now).
+fn flush_room_durable(
+    engine: &mut SyncEngine,
+    room: &mut RoomCtx,
+) -> Result<Vec<ClientMsg>, SyncError> {
+    let (diff, checkpoint) = engine.coedit_diff(&room.note_id, &room.checkpoint)?;
+    room.checkpoint = checkpoint;
+    room.durable_dirty = false;
+    if diff.is_empty() {
+        return Ok(Vec::new());
+    }
+    engine.push_updates(vec![DocUpdate {
+        doc: room.doc_key(),
+        u: diff,
+    }])
+}
+
 /// When a debounced presence send should fire.
 fn debounced_at(last_sent: Option<Instant>, debounce: Duration) -> Instant {
     match last_sent {
@@ -219,9 +328,12 @@ where
 {
     ensure_crypto_provider();
     let mut backoff: Option<Duration> = None;
-    let mut presence = PresenceCtx {
-        state: PresenceState::default(),
-        peers: PeerTracker::new(config.presence_ttl),
+    let mut ctx = LiveState {
+        presence: PresenceCtx {
+            state: PresenceState::default(),
+            peers: PeerTracker::new(config.presence_ttl),
+        },
+        room: None,
     };
     loop {
         match session(
@@ -230,7 +342,7 @@ where
             config,
             cmds,
             &mut backoff,
-            &mut presence,
+            &mut ctx,
             &mut on_event,
         )
         .await?
@@ -250,18 +362,55 @@ where
                             None => {
                                 // Shutting down while disconnected: no
                                 // socket for a goodbye (peers expire via
-                                // TTL); anything received but unapplied is
-                                // in the persisted queue — flush it now.
+                                // TTL). Durable room edits + received
+                                // applies are crash-safe — flush both.
+                                if let Some(room) = &mut ctx.room {
+                                    let _ = flush_room_durable(engine, room)?;
+                                }
                                 flush_pending(engine, writer, &mut on_event)?;
                                 return Ok(());
                             }
                             Some(LiveCmd::Presence(state)) => {
                                 // Remember the newest state for the next
                                 // session's announce, then retry right away.
-                                presence.state = state;
+                                ctx.presence.state = state;
                             }
                             Some(LiveCmd::Nudge) => {
                                 // A local change while down → retry now.
+                            }
+                            Some(LiveCmd::RoomEnter { note_id }) => {
+                                // Offline room: fold the disk (pushes queue
+                                // in the crash-safe outbox), hand the local
+                                // doc state over, co-edit locally.
+                                let _ = engine.tick_scan_with_updates()?;
+                                let (state, checkpoint, _) =
+                                    engine.coedit_enter_state(&note_id)?;
+                                ctx.room = Some(RoomCtx {
+                                    note_id: note_id.clone(),
+                                    checkpoint,
+                                    durable_dirty: false,
+                                });
+                                on_event(LiveEvent::RoomState { note_id, state });
+                            }
+                            Some(LiveCmd::RoomLeave) => {
+                                if let Some(mut room) = ctx.room.take() {
+                                    let _ = flush_room_durable(engine, &mut room)?;
+                                }
+                            }
+                            Some(LiveCmd::CoeditUpdate { note_id, update }) => {
+                                // Apply + flush durably right away (no
+                                // debounce offline — everything queues in
+                                // the outbox anyway) + materialize.
+                                engine.apply_coedit_update(&note_id, &update)?;
+                                if let Some(room) = &mut ctx.room {
+                                    if room.note_id == note_id {
+                                        let _ = flush_room_durable(engine, room)?;
+                                    }
+                                }
+                                flush_pending(engine, writer, &mut on_event)?;
+                            }
+                            Some(LiveCmd::CoeditAwareness { .. }) => {
+                                // Ephemeral — meaningless while offline.
                             }
                         }
                     }
@@ -277,7 +426,7 @@ async fn session<F>(
     config: &LiveConfig,
     cmds: &mut mpsc::Receiver<LiveCmd>,
     backoff: &mut Option<Duration>,
-    presence: &mut PresenceCtx,
+    ctx: &mut LiveState,
     on_event: &mut F,
 ) -> Result<SessionEnd, SyncError>
 where
@@ -296,7 +445,7 @@ where
     if let Some(reason) = send_all(&mut sink, &hello).await? {
         return Ok(SessionEnd::Network(reason));
     }
-    if let Some(reason) = fold_and_push(engine, &mut sink, on_event).await? {
+    if let Some(reason) = fold_and_push(engine, &mut sink, ctx.room.as_mut(), on_event).await? {
         return Ok(SessionEnd::Network(reason));
     }
 
@@ -320,9 +469,12 @@ where
     } else {
         Some(Instant::now() + config.apply_debounce)
     };
+    // Durable co-edit flush: armed while the room has unflushed local edits.
+    let mut durable_at = Instant::now() + config.coedit_durable_debounce;
 
     loop {
         let apply_at = apply_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
+        let durable_due = ctx.room.as_ref().is_some_and(|r| r.durable_dirty);
         tokio::select! {
             frame = stream.next() => {
                 last_frame = Instant::now();
@@ -344,8 +496,9 @@ where
                     Ok(None) => continue, // a future protocol frame — skip, don't die
                     Err(e) => return Ok(SessionEnd::Network(format!("bad frame: {e}"))),
                 };
-                // Presence is ephemeral and never touches the engine: decode,
-                // fold into the peer map, surface changes, move on.
+                // Ephemeral frames never touch on_server_msg: presence folds
+                // into the peer map; co-edit updates apply to the doc and
+                // stream to the open room's frontend.
                 if let ServerMsg::Presence { blob } = &msg {
                     if let Some(payload) = engine.open_presence(blob) {
                         if payload.hello && !payload.gone && presence_on {
@@ -357,8 +510,37 @@ where
                             presence_send_at =
                                 debounced_at(last_presence_sent, config.presence_debounce);
                         }
-                        if presence.peers.observe(&payload, std::time::Instant::now()) {
-                            on_event(LiveEvent::Peers(presence.peers.snapshot()));
+                        if ctx.presence.peers.observe(&payload, std::time::Instant::now()) {
+                            on_event(LiveEvent::Peers(ctx.presence.peers.snapshot()));
+                        }
+                    } else if let Some(coedit) = engine.open_coedit(blob) {
+                        let in_room = ctx
+                            .room
+                            .as_ref()
+                            .is_some_and(|r| r.note_id == coedit.note_id);
+                        match coedit.kind {
+                            CoeditKind::Update => {
+                                // Keystrokes land in the doc + the apply
+                                // queue regardless of a room — a headless
+                                // live device materializes them too.
+                                engine.apply_coedit_update(&coedit.note_id, &coedit.data)?;
+                                apply_deadline =
+                                    Some(Instant::now() + config.apply_debounce);
+                                if in_room {
+                                    on_event(LiveEvent::CoeditUpdate {
+                                        note_id: coedit.note_id,
+                                        update: coedit.data,
+                                    });
+                                }
+                            }
+                            CoeditKind::Awareness => {
+                                if in_room {
+                                    on_event(LiveEvent::CoeditAwareness {
+                                        note_id: coedit.note_id,
+                                        data: coedit.data,
+                                    });
+                                }
+                            }
                         }
                     }
                     continue;
@@ -373,7 +555,7 @@ where
                     if presence_on {
                         // Announce ourselves; hello=true asks peers to
                         // answer so a fresh device discovers everyone fast.
-                        let frame = engine.seal_presence(&presence.state, true, false)?;
+                        let frame = engine.seal_presence(&ctx.presence.state, true, false)?;
                         if let Some(reason) = send_all(&mut sink, &[frame]).await? {
                             return Ok(SessionEnd::Network(reason));
                         }
@@ -382,13 +564,24 @@ where
                     }
                     // Unconditional snapshot: hosts repaint after reconnect
                     // or webview reload even when nothing changed.
-                    on_event(LiveEvent::Peers(presence.peers.snapshot()));
+                    on_event(LiveEvent::Peers(ctx.presence.peers.snapshot()));
+                    // An open room resyncs its frontend the same way (the
+                    // full-state apply is idempotent).
+                    if let Some(room) = &ctx.room {
+                        let (state, _, _) = engine.coedit_enter_state(&room.note_id)?;
+                        on_event(LiveEvent::RoomState {
+                            note_id: room.note_id.clone(),
+                            state,
+                        });
+                    }
                 }
                 // Fold-before-apply: local disk state enters the CRDT before
                 // this update does, so concurrent edits merge instead of the
                 // stale snapshot erasing the remote edit later.
                 if matches!(msg, ServerMsg::Update { .. }) && last_scan.elapsed() >= config.fold_guard {
-                    if let Some(reason) = fold_and_push(engine, &mut sink, on_event).await? {
+                    if let Some(reason) =
+                        fold_and_push(engine, &mut sink, ctx.room.as_mut(), on_event).await?
+                    {
                         return Ok(SessionEnd::Network(reason));
                     }
                     last_scan = Instant::now();
@@ -396,6 +589,20 @@ where
                 let effect = engine.on_server_msg(msg)?;
                 if !effect.dirty_items.is_empty() {
                     apply_deadline = Some(Instant::now() + config.apply_debounce);
+                }
+                // Durable updates for the room note (a peer's checkpoint
+                // push, a pass-based device's scan) reach the frontend doc
+                // too — idempotent for anything it already saw ephemerally.
+                if let Some(room) = &ctx.room {
+                    let key = room.doc_key();
+                    for update in &effect.updates {
+                        if update.doc == key {
+                            on_event(LiveEvent::CoeditUpdate {
+                                note_id: room.note_id.clone(),
+                                update: update.u.clone(),
+                            });
+                        }
+                    }
                 }
                 if let Some(reason) = send_all(&mut sink, &effect.outbound).await? {
                     return Ok(SessionEnd::Network(reason));
@@ -412,12 +619,18 @@ where
             cmd = cmds.recv() => {
                 match cmd {
                     None => {
-                        // Goodbye first (peers drop us immediately instead
-                        // of waiting out the TTL); errors don't matter,
-                        // we're leaving. flush_pending never touches the
-                        // sink, so the ordering is safe.
+                        // Leaving: durable room flush first (queues in the
+                        // crash-safe outbox even if the send fails), then
+                        // the presence goodbye, then materialize. None of
+                        // flush_pending touches the sink — ordering is safe.
+                        if let Some(room) = &mut ctx.room {
+                            let msgs = flush_room_durable(engine, room)?;
+                            let _ = send_all(&mut sink, &msgs).await;
+                        }
                         if presence_on {
-                            if let Ok(frame) = engine.seal_presence(&presence.state, false, true) {
+                            if let Ok(frame) =
+                                engine.seal_presence(&ctx.presence.state, false, true)
+                            {
                                 let _ = send_all(&mut sink, &[frame]).await;
                             }
                         }
@@ -426,8 +639,9 @@ where
                         return Ok(SessionEnd::Shutdown);
                     }
                     Some(first) => {
-                        // Coalesce the burst WITHOUT swallowing presence:
-                        // fold every queued cmd into (nudged, newest state).
+                        // Drain the burst, coalescing ONLY the order-free
+                        // cmds (nudge, presence). Room/co-edit cmds are
+                        // order-sensitive and processed as they came.
                         let mut nudged = false;
                         let mut new_state: Option<PresenceState> = None;
                         for cmd in std::iter::once(first)
@@ -436,11 +650,108 @@ where
                             match cmd {
                                 LiveCmd::Nudge => nudged = true,
                                 LiveCmd::Presence(state) => new_state = Some(state),
+                                LiveCmd::RoomEnter { note_id } => {
+                                    // Replacing a room flushes the old one.
+                                    if let Some(room) = &mut ctx.room {
+                                        let msgs = flush_room_durable(engine, room)?;
+                                        if let Some(reason) =
+                                            send_all(&mut sink, &msgs).await?
+                                        {
+                                            return Ok(SessionEnd::Network(reason));
+                                        }
+                                    }
+                                    // Fold-before: the disk enters the CRDT
+                                    // before the frontend adopts its state.
+                                    if let Some(reason) =
+                                        fold_and_push(engine, &mut sink, None, on_event)
+                                            .await?
+                                    {
+                                        return Ok(SessionEnd::Network(reason));
+                                    }
+                                    last_scan = Instant::now();
+                                    let (state, checkpoint, bootstrap) =
+                                        engine.coedit_enter_state(&note_id)?;
+                                    if let Some(reason) =
+                                        send_all(&mut sink, &bootstrap).await?
+                                    {
+                                        return Ok(SessionEnd::Network(reason));
+                                    }
+                                    ctx.room = Some(RoomCtx {
+                                        note_id: note_id.clone(),
+                                        checkpoint,
+                                        durable_dirty: false,
+                                    });
+                                    on_event(LiveEvent::RoomState { note_id, state });
+                                }
+                                LiveCmd::RoomLeave => {
+                                    if let Some(mut room) = ctx.room.take() {
+                                        let msgs = flush_room_durable(engine, &mut room)?;
+                                        if let Some(reason) =
+                                            send_all(&mut sink, &msgs).await?
+                                        {
+                                            return Ok(SessionEnd::Network(reason));
+                                        }
+                                    }
+                                }
+                                LiveCmd::CoeditUpdate { note_id, update } => {
+                                    // Our own keystrokes take the same path
+                                    // as a peer's: doc + apply queue (the
+                                    // backend is the only disk writer).
+                                    engine.apply_coedit_update(&note_id, &update)?;
+                                    apply_deadline =
+                                        Some(Instant::now() + config.apply_debounce);
+                                    let mut oversize = false;
+                                    if presence_on {
+                                        let frame = engine.seal_coedit(
+                                            &note_id,
+                                            CoeditKind::Update,
+                                            &update,
+                                        )?;
+                                        if frame_fits(&frame) {
+                                            if let Some(reason) =
+                                                send_all(&mut sink, &[frame]).await?
+                                            {
+                                                return Ok(SessionEnd::Network(reason));
+                                            }
+                                        } else {
+                                            oversize = true;
+                                        }
+                                    }
+                                    if let Some(room) = &mut ctx.room {
+                                        if room.note_id == note_id {
+                                            room.durable_dirty = true;
+                                            durable_at = if oversize {
+                                                // Too big for the fast tier:
+                                                // peers get it durably now.
+                                                Instant::now()
+                                            } else {
+                                                Instant::now()
+                                                    + config.coedit_durable_debounce
+                                            };
+                                        }
+                                    }
+                                }
+                                LiveCmd::CoeditAwareness { note_id, data } => {
+                                    if presence_on {
+                                        let frame = engine.seal_coedit(
+                                            &note_id,
+                                            CoeditKind::Awareness,
+                                            &data,
+                                        )?;
+                                        if frame_fits(&frame) {
+                                            if let Some(reason) =
+                                                send_all(&mut sink, &[frame]).await?
+                                            {
+                                                return Ok(SessionEnd::Network(reason));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         if let Some(state) = new_state {
-                            if state != presence.state {
-                                presence.state = state;
+                            if state != ctx.presence.state {
+                                ctx.presence.state = state;
                                 if presence_on {
                                     presence_dirty = true;
                                     presence_send_at = debounced_at(
@@ -452,7 +763,8 @@ where
                         }
                         if nudged {
                             if let Some(reason) =
-                                fold_and_push(engine, &mut sink, on_event).await?
+                                fold_and_push(engine, &mut sink, ctx.room.as_mut(), on_event)
+                                    .await?
                             {
                                 return Ok(SessionEnd::Network(reason));
                             }
@@ -461,9 +773,20 @@ where
                     }
                 }
             }
+            _ = tokio::time::sleep_until(durable_at), if durable_due => {
+                if let Some(room) = &mut ctx.room {
+                    let msgs = flush_room_durable(engine, room)?;
+                    if let Some(reason) = send_all(&mut sink, &msgs).await? {
+                        return Ok(SessionEnd::Network(reason));
+                    }
+                    if !msgs.is_empty() {
+                        on_event(LiveEvent::Pushed { count: msgs.len() });
+                    }
+                }
+            }
             _ = tokio::time::sleep_until(presence_send_at), if presence_on && presence_dirty => {
                 presence_dirty = false;
-                let frame = engine.seal_presence(&presence.state, false, false)?;
+                let frame = engine.seal_presence(&ctx.presence.state, false, false)?;
                 if let Some(reason) = send_all(&mut sink, &[frame]).await? {
                     return Ok(SessionEnd::Network(reason));
                 }
@@ -474,13 +797,13 @@ where
             _ = tokio::time::sleep_until(next_presence), if presence_on => {
                 next_presence = Instant::now() + config.presence_interval;
                 presence_dirty = false;
-                let frame = engine.seal_presence(&presence.state, false, false)?;
+                let frame = engine.seal_presence(&ctx.presence.state, false, false)?;
                 if let Some(reason) = send_all(&mut sink, &[frame]).await? {
                     return Ok(SessionEnd::Network(reason));
                 }
                 last_presence_sent = Some(Instant::now());
-                if presence.peers.sweep(std::time::Instant::now()) {
-                    on_event(LiveEvent::Peers(presence.peers.snapshot()));
+                if ctx.presence.peers.sweep(std::time::Instant::now()) {
+                    on_event(LiveEvent::Peers(ctx.presence.peers.snapshot()));
                 }
             }
             _ = tokio::time::sleep_until(apply_at), if apply_deadline.is_some() => {
@@ -489,7 +812,9 @@ where
             }
             _ = tokio::time::sleep_until(next_scan) => {
                 next_scan = Instant::now() + config.scan_interval;
-                if let Some(reason) = fold_and_push(engine, &mut sink, on_event).await? {
+                if let Some(reason) =
+                    fold_and_push(engine, &mut sink, ctx.room.as_mut(), on_event).await?
+                {
                     return Ok(SessionEnd::Network(reason));
                 }
                 last_scan = Instant::now();
@@ -548,6 +873,25 @@ mod tests {
             "a peer survives two lost heartbeats before expiring"
         );
         assert!(config.presence_debounce < Duration::from_secs(1));
+        assert!(
+            config.coedit_durable_debounce >= Duration::from_secs(1),
+            "keystrokes batch into the log, they don't spam it"
+        );
+    }
+
+    #[test]
+    fn frame_fits_enforces_the_relay_b64_cap() {
+        let small = ClientMsg::Presence {
+            blob: vec![0; 4 * 1024],
+        };
+        assert!(frame_fits(&small));
+        let big = ClientMsg::Presence {
+            blob: vec![0; 7 * 1024],
+        };
+        assert!(!frame_fits(&big), "7KB raw > 8KiB as base64");
+        assert!(frame_fits(&ClientMsg::Push {
+            blob: vec![0; 100_000]
+        }));
     }
 
     #[test]

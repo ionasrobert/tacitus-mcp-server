@@ -24,3 +24,5 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 tacitus-sync = { path = "../tacitus-sync", features = ["client"] }
 tacitus-core = { path = "../tacitus-core" }
+# The co-editing E2E tests play the "frontend" with a raw yrs doc.
+yrs.workspace = true

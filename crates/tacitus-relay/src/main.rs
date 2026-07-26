@@ -974,6 +974,406 @@ mod tests {
         a.task.await.unwrap().unwrap();
     }
 
+    // ---- co-editing rooms (collab-m3) ----------------------------------
+    // The tests play the desktop frontend with a raw yrs doc: RoomState
+    // bootstraps it, local edits become v2 diffs sent as LiveCmd, remote
+    // LiveEvents apply back into it.
+
+    /// Stand-in for the frontend's Y.Doc (byte offsets, like the engine's).
+    struct FrontDoc {
+        doc: yrs::Doc,
+    }
+
+    impl FrontDoc {
+        fn new(state: &[u8]) -> Self {
+            use yrs::updates::decoder::Decode;
+            use yrs::Transact;
+            let doc = yrs::Doc::with_options(yrs::Options {
+                offset_kind: yrs::OffsetKind::Bytes,
+                ..Default::default()
+            });
+            let update = yrs::Update::decode_v2(state).expect("valid room state");
+            doc.transact_mut().apply_update(update).unwrap();
+            Self { doc }
+        }
+
+        fn text(&self) -> String {
+            use yrs::{GetString, Transact};
+            let text = self.doc.get_or_insert_text("c");
+            let txn = self.doc.transact();
+            text.get_string(&txn)
+        }
+
+        /// Insert at byte offset; returns the v2 diff to send upstream.
+        fn insert(&mut self, index: u32, chunk: &str) -> Vec<u8> {
+            use yrs::{ReadTxn, Text, Transact};
+            let text = self.doc.get_or_insert_text("c");
+            let mut txn = self.doc.transact_mut();
+            let before = txn.state_vector();
+            text.insert(&mut txn, index, chunk);
+            txn.encode_state_as_update_v2(&before)
+        }
+
+        fn apply(&mut self, update: &[u8]) {
+            use yrs::updates::decoder::Decode;
+            use yrs::Transact;
+            let parsed = yrs::Update::decode_v2(update).expect("valid update");
+            self.doc.transact_mut().apply_update(parsed).unwrap();
+        }
+    }
+
+    /// Drain a Live's events into room-shaped state.
+    #[derive(Default)]
+    struct RoomFeed {
+        states: Vec<(String, Vec<u8>)>,
+        updates: Vec<(String, Vec<u8>)>,
+        awareness: Vec<(String, Vec<u8>)>,
+    }
+
+    fn drain_room(live: &Live, feed: &mut RoomFeed) {
+        for event in live.events.try_iter() {
+            match event {
+                LiveEvent::RoomState { note_id, state } => feed.states.push((note_id, state)),
+                LiveEvent::CoeditUpdate { note_id, update } => feed.updates.push((note_id, update)),
+                LiveEvent::CoeditAwareness { note_id, data } => {
+                    feed.awareness.push((note_id, data))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn coedit_rooms_exchange_keystrokes_and_materialize_everywhere() {
+        let url = spawn_relay(temp_dir("coedit-data")).await;
+        let va = temp_dir("coedit-va");
+        let vb = temp_dir("coedit-vb");
+        let vc = temp_dir("coedit-vc");
+        std::fs::write(va.join("doc.md"), "base\n").unwrap();
+        let code = LiveCode::generate();
+        let fast = |c: &mut LiveConfig| {
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(150);
+        };
+        let a = spawn_live(&va, &code, &url, fast);
+        let b = spawn_live(&vb, &code, &url, fast);
+        // C: headless live device, never opens a room.
+        let c = spawn_live(&vc, &code, &url, fast);
+
+        wait_until("baseline lands on B", || vb.join("doc.md").exists()).await;
+
+        a.nudge
+            .send(LiveCmd::RoomEnter {
+                note_id: "doc".into(),
+            })
+            .await
+            .unwrap();
+        b.nudge
+            .send(LiveCmd::RoomEnter {
+                note_id: "doc".into(),
+            })
+            .await
+            .unwrap();
+
+        let (mut feed_a, mut feed_b) = (RoomFeed::default(), RoomFeed::default());
+        wait_until("both get RoomState", || {
+            drain_room(&a, &mut feed_a);
+            drain_room(&b, &mut feed_b);
+            !feed_a.states.is_empty() && !feed_b.states.is_empty()
+        })
+        .await;
+        let mut front_a = FrontDoc::new(&feed_a.states[0].1);
+        let mut front_b = FrontDoc::new(&feed_b.states[0].1);
+        assert_eq!(front_a.text(), "base\n");
+        assert_eq!(front_b.text(), "base\n");
+
+        // A types at the top, B types at the bottom — concurrently.
+        let update_a = front_a.insert(0, "A> ");
+        let update_b = front_b.insert(5, "B!\n");
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update: update_a,
+            })
+            .await
+            .unwrap();
+        b.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update: update_b,
+            })
+            .await
+            .unwrap();
+
+        wait_until("frontends converge with both edits", || {
+            drain_room(&a, &mut feed_a);
+            drain_room(&b, &mut feed_b);
+            for (note, update) in feed_a.updates.drain(..) {
+                assert_eq!(note, "doc");
+                front_a.apply(&update);
+            }
+            for (note, update) in feed_b.updates.drain(..) {
+                assert_eq!(note, "doc");
+                front_b.apply(&update);
+            }
+            let (ta, tb) = (front_a.text(), front_b.text());
+            ta == tb && ta.contains("A> ") && ta.contains("B!\n")
+        })
+        .await;
+
+        // The backend is the only disk writer — both disks materialize…
+        wait_until("disks materialize the merge", || {
+            let da = std::fs::read_to_string(va.join("doc.md")).unwrap_or_default();
+            let db = std::fs::read_to_string(vb.join("doc.md")).unwrap_or_default();
+            da == db && da.contains("A> ") && da.contains("B!\n")
+        })
+        .await;
+        // …and so does the ROOMLESS headless device (from the ephemeral
+        // frames it applies + the debounced materialize).
+        wait_until("headless C converges too", || {
+            std::fs::read_to_string(vc.join("doc.md"))
+                .map(|t| t.contains("A> ") && t.contains("B!\n"))
+                .unwrap_or(false)
+        })
+        .await;
+
+        // Awareness reaches the peer's room, never the roomless device.
+        a.nudge
+            .send(LiveCmd::CoeditAwareness {
+                note_id: "doc".into(),
+                data: vec![1, 2, 3],
+            })
+            .await
+            .unwrap();
+        wait_until("B sees A's awareness", || {
+            drain_room(&b, &mut feed_b);
+            feed_b
+                .awareness
+                .iter()
+                .any(|(note, data)| note == "doc" && data == &vec![1, 2, 3])
+        })
+        .await;
+        let mut feed_c = RoomFeed::default();
+        drain_room(&c, &mut feed_c);
+        assert!(
+            feed_c.awareness.is_empty() && feed_c.states.is_empty(),
+            "roomless devices get no room events"
+        );
+
+        drop(a.nudge);
+        drop(b.nudge);
+        drop(c.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+        c.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn room_edits_land_durably_and_oversize_falls_back_to_the_log() {
+        let url = spawn_relay(temp_dir("durable-data")).await;
+        let va = temp_dir("durable-va");
+        std::fs::write(va.join("doc.md"), "start\n").unwrap();
+        let code = LiveCode::generate();
+        let a = spawn_live(&va, &code, &url, |c| {
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(120);
+        });
+        a.nudge
+            .send(LiveCmd::RoomEnter {
+                note_id: "doc".into(),
+            })
+            .await
+            .unwrap();
+        let mut feed = RoomFeed::default();
+        wait_until("room state", || {
+            drain_room(&a, &mut feed);
+            !feed.states.is_empty()
+        })
+        .await;
+        let mut front = FrontDoc::new(&feed.states[0].1);
+
+        // A normal keystroke batch…
+        let small = front.insert(0, "typed ");
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update: small,
+            })
+            .await
+            .unwrap();
+        // …and a paste far past the ephemeral frame budget (~4.4KB raw).
+        let huge_chunk = "x".repeat(7 * 1024);
+        let huge = front.insert(6, &huge_chunk);
+        assert!(huge.len() > 6 * 1024);
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update: huge,
+            })
+            .await
+            .unwrap();
+
+        // A pass-based device (no rooms, no ephemeral frames — run_once
+        // reads ONLY the durable log) must converge on everything.
+        let vd = temp_dir("durable-vd");
+        let mut engine = LiveEngine::open(&vd, &code).unwrap();
+        let mut writer = LiveWriter::new(&vd, LiveScope::ReadWrite);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tacitus_sync::client::sync_pass(&mut engine, &mut writer, &url)
+                .await
+                .unwrap();
+            let text = std::fs::read_to_string(vd.join("doc.md")).unwrap_or_default();
+            if text.starts_with("typed x") && text.contains(&huge_chunk) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "durable tier never delivered; got: {:?}…",
+                &text.chars().take(40).collect::<String>()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_fold_forwards_to_the_room_and_offline_enter_reemits() {
+        // Reserve an addr; the relay starts LATER — the room opens offline.
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let url = format!("ws://{addr}/ws");
+
+        let va = temp_dir("fold-room-va");
+        std::fs::write(va.join("doc.md"), "offline base\n").unwrap();
+        let code = LiveCode::generate();
+        let a = spawn_live(&va, &code, &url, |c| {
+            c.backoff_min = Duration::from_millis(50);
+            c.backoff_max = Duration::from_millis(200);
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(120);
+        });
+
+        // Entering a room while disconnected still yields a usable state.
+        let mut feed = RoomFeed::default();
+        wait_until("offline RoomState", || {
+            a.nudge
+                .try_send(LiveCmd::RoomEnter {
+                    note_id: "doc".into(),
+                })
+                .ok();
+            drain_room(&a, &mut feed);
+            !feed.states.is_empty()
+        })
+        .await;
+        assert_eq!(FrontDoc::new(&feed.states[0].1).text(), "offline base\n");
+        let states_before_connect = feed.states.len();
+
+        // The relay appears → reconnect → the room resyncs its frontend.
+        let state = Arc::new(RelayState::new(temp_dir("fold-room-data")));
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app(state)).await.unwrap();
+        });
+        wait_until("RoomState re-emitted after connect", || {
+            drain_room(&a, &mut feed);
+            feed.states.len() > states_before_connect
+        })
+        .await;
+
+        // An EXTERNAL writer (agent/plugin/editor) hits the disk + a nudge:
+        // the fold's exact bytes reach the room frontend.
+        let mut front = FrontDoc::new(&feed.states.last().unwrap().1);
+        std::fs::write(va.join("doc.md"), "offline base\nagent line\n").unwrap();
+        a.nudge.send(LiveCmd::Nudge).await.unwrap();
+        wait_until("fold forwarded to the room", || {
+            drain_room(&a, &mut feed);
+            for (_, update) in feed.updates.drain(..) {
+                front.apply(&update);
+            }
+            front.text() == "offline base\nagent line\n"
+        })
+        .await;
+
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_relay_gets_no_coedit_frames_but_durable_pushes_flow() {
+        // 0.19-style stub: welcome WITHOUT caps → the fast tier stays off,
+        // yet room edits still reach the log through durable pushes.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = std_mpsc::channel::<String>();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut sink, mut frames) = ws.split();
+            while let Some(Ok(frame)) = frames.next().await {
+                if let WsMessage::Text(text) = frame {
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let tag = v["t"].as_str().unwrap_or("?").to_string();
+                    let is_hello = tag == "hello";
+                    let _ = seen_tx.send(tag);
+                    if is_hello {
+                        let welcome = r#"{"t":"welcome","latest_seq":0}"#;
+                        sink.send(WsMessage::Text(welcome.to_string().into()))
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        });
+
+        let va = temp_dir("old-coedit-va");
+        std::fs::write(va.join("doc.md"), "base\n").unwrap();
+        let code = LiveCode::generate();
+        let a = spawn_live(&va, &code, &format!("ws://{addr}/ws"), |c| {
+            c.coedit_durable_debounce = Duration::from_millis(80);
+        });
+        a.nudge
+            .send(LiveCmd::RoomEnter {
+                note_id: "doc".into(),
+            })
+            .await
+            .unwrap();
+        let mut feed = RoomFeed::default();
+        wait_until("room state against the old relay", || {
+            drain_room(&a, &mut feed);
+            !feed.states.is_empty()
+        })
+        .await;
+        let mut front = FrontDoc::new(&feed.states[0].1);
+        let update = front.insert(0, "quietly ");
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update,
+            })
+            .await
+            .unwrap();
+
+        // The durable flush produces a second push; presence/coedit frames
+        // never appear.
+        let mut seen: Vec<String> = Vec::new();
+        wait_until("two durable pushes seen by the stub", || {
+            seen.extend(seen_rx.try_iter());
+            seen.iter().filter(|t| *t == "push").count() >= 2
+        })
+        .await;
+        assert!(
+            !seen.iter().any(|t| t == "presence"),
+            "an extension frame leaked to an old relay: {seen:?}"
+        );
+
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn sync_pass_materializes_crash_leftovers() {
         let url = spawn_relay(temp_dir("leftover-data")).await;
