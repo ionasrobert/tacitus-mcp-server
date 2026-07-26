@@ -233,6 +233,7 @@ impl SyncEngine {
             }
         }
         self.shadow.save(&self.sync_dir).map_err(SyncError::io)?;
+        self.clear_pending_apply(dirty)?;
         Ok(report)
     }
 
@@ -349,6 +350,10 @@ mod tests {
         let report = b.apply_dirty(&mut writer, &dirty).unwrap();
 
         assert!(report.skipped.contains(&"n:doc".to_string()));
+        assert!(
+            b.pending_apply().is_empty(),
+            "a skip clears the queue too — the fold path owns recovery"
+        );
         assert_eq!(
             fs::read_to_string(db.join("doc.md")).unwrap(),
             "local edit AFTER the scan\n",
@@ -415,6 +420,62 @@ mod tests {
         assert!(db.join(".tacitus/memory/mem_x1.md").exists());
         // Applying our own write is not re-detected as a local change.
         assert!(b.tick_scan().unwrap().is_empty());
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn update_receipt_survives_crash_before_apply() {
+        let da = temp_vault("crash-a");
+        let db = temp_vault("crash-b");
+        fs::write(da.join("note.md"), "survives the crash\n").unwrap();
+        let code = VaultCode::generate();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+
+        let mut seq = 1;
+        {
+            // B receives the update but "crashes" before apply_dirty runs.
+            let mut b = SyncEngine::open(&db, &code).unwrap();
+            let dirty = pump(&mut a, &mut b, &mut seq);
+            assert_eq!(dirty, vec!["n:note"]);
+        }
+
+        // The receipt must survive the restart — the relay never redelivers
+        // below the persisted cursor, so this queue is the only trigger left.
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        let pending = b.pending_apply();
+        assert_eq!(pending, vec!["n:note"], "receipt survives restart");
+
+        let mut writer = NoteWriter::new(&db, PermissionScope::ReadWrite);
+        b.apply_dirty(&mut writer, &pending).unwrap();
+        assert_eq!(
+            fs::read_to_string(db.join("note.md")).unwrap(),
+            "survives the crash\n"
+        );
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn apply_clears_pending_queue() {
+        let da = temp_vault("clear-a");
+        let db = temp_vault("clear-b");
+        fs::write(da.join("note.md"), "hello\n").unwrap();
+        let code = VaultCode::generate();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+
+        let mut seq = 1;
+        let dirty = pump(&mut a, &mut b, &mut seq);
+        assert_eq!(b.pending_apply(), dirty, "receipt queued before apply");
+
+        let mut writer = NoteWriter::new(&db, PermissionScope::ReadWrite);
+        b.apply_dirty(&mut writer, &dirty).unwrap();
+        assert!(b.pending_apply().is_empty(), "apply clears the queue");
+
+        // …and stays clear across a restart (the file is rewritten too).
+        let b2 = SyncEngine::open(&db, &code).unwrap();
+        assert!(b2.pending_apply().is_empty());
         fs::remove_dir_all(&da).ok();
         fs::remove_dir_all(&db).ok();
     }

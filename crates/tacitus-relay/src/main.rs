@@ -505,6 +505,290 @@ mod tests {
         );
     }
 
+    // ---- live sessions (collab-m1) -------------------------------------
+    // These drive the persistent `run_live` loop end-to-end through a real
+    // in-process relay: sub-second convergence, the fold-before-apply merge
+    // invariant, reconnect backoff, and clean shutdown on sender drop.
+
+    use std::sync::mpsc as std_mpsc;
+    use tacitus_core::vault::{NoteWriter as LiveWriter, PermissionScope as LiveScope};
+    use tacitus_sync::live::{run_live, LiveConfig, LiveEvent};
+    use tacitus_sync::{SyncEngine as LiveEngine, SyncError, VaultCode as LiveCode};
+
+    /// Poll until `cond` holds — deadline-capped, never a fixed sleep.
+    async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !cond() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for: {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    struct Live {
+        nudge: tokio::sync::mpsc::Sender<()>,
+        events: std_mpsc::Receiver<LiveEvent>,
+        task: tokio::task::JoinHandle<Result<(), SyncError>>,
+    }
+
+    fn spawn_live(
+        vault: &std::path::Path,
+        code: &LiveCode,
+        url: &str,
+        tweak: impl FnOnce(&mut LiveConfig),
+    ) -> Live {
+        let mut engine = LiveEngine::open(vault, code).unwrap();
+        let mut writer = LiveWriter::new(vault, LiveScope::ReadWrite);
+        writer.set_origin("sync");
+        let mut config = LiveConfig::new(url);
+        // Test-friendly timings; individual tests override further.
+        config.apply_debounce = Duration::from_millis(50);
+        tweak(&mut config);
+        let (ntx, mut nrx) = tokio::sync::mpsc::channel(4);
+        let (etx, erx) = std_mpsc::channel();
+        let task = tokio::spawn(async move {
+            run_live(&mut engine, &mut writer, &config, &mut nrx, |ev| {
+                let _ = etx.send(ev);
+            })
+            .await
+        });
+        Live {
+            nudge: ntx,
+            events: erx,
+            task,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_sessions_converge_subsecond_via_nudge() {
+        let url = spawn_relay(temp_dir("live-data")).await;
+        let va = temp_dir("live-va");
+        let vb = temp_dir("live-vb");
+        let code = LiveCode::generate();
+
+        let a = spawn_live(&va, &code, &url, |_| {});
+        let b = spawn_live(&vb, &code, &url, |_| {});
+
+        // Type on A, nudge — B's DISK converges with no pass cadence at all.
+        std::fs::write(va.join("note.md"), "typed on A\n").unwrap();
+        a.nudge.send(()).await.unwrap();
+        wait_until("note lands on B", || vb.join("note.md").exists()).await;
+        assert_eq!(
+            std::fs::read_to_string(vb.join("note.md")).unwrap(),
+            "typed on A\n"
+        );
+
+        // Dropping every sender ends both sessions cleanly.
+        drop(a.nudge);
+        drop(b.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+
+        // B's event order: Connected first, CaughtUp before the Applied.
+        let evs: Vec<LiveEvent> = b.events.try_iter().collect();
+        assert!(
+            matches!(evs.first(), Some(LiveEvent::Connected { .. })),
+            "first event is Connected, got {evs:?}"
+        );
+        let caught = evs
+            .iter()
+            .position(|e| matches!(e, LiveEvent::CaughtUp))
+            .expect("CaughtUp fired");
+        let applied = evs
+            .iter()
+            .position(|e| matches!(e, LiveEvent::Applied(_)))
+            .expect("Applied fired");
+        assert!(caught < applied, "CaughtUp precedes Applied: {evs:?}");
+
+        // A pushed, but its own echo must never come back as an Applied.
+        let evs: Vec<LiveEvent> = a.events.try_iter().collect();
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, LiveEvent::Pushed { count } if *count > 0)));
+        assert!(
+            !evs.iter().any(|e| matches!(e, LiveEvent::Applied(_))),
+            "own echo applied: {evs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_fold_before_apply_merges_concurrent_disk_edit() {
+        let url = spawn_relay(temp_dir("fold-data")).await;
+        let va = temp_dir("fold-va");
+        let vb = temp_dir("fold-vb");
+        let code = LiveCode::generate();
+
+        // fold_guard ZERO pins the mechanism under test (fold on every
+        // incoming Update); a long scan_interval rules the periodic scan out.
+        let pin = |c: &mut LiveConfig| {
+            c.fold_guard = Duration::ZERO;
+            c.scan_interval = Duration::from_secs(120);
+        };
+        let a = spawn_live(&va, &code, &url, pin);
+        let b = spawn_live(&vb, &code, &url, pin);
+
+        // Converge on a shared baseline.
+        std::fs::write(va.join("doc.md"), "baseline\n").unwrap();
+        a.nudge.send(()).await.unwrap();
+        wait_until("baseline lands on B", || {
+            std::fs::read_to_string(vb.join("doc.md")).ok().as_deref() == Some("baseline\n")
+        })
+        .await;
+
+        // B edits its DISK without any nudge; A pushes a concurrent edit.
+        // The incoming Update must fold B's local line first, so the CRDT
+        // merges both — instead of the remote apply skipping (or a later
+        // stale fold erasing A's line).
+        std::fs::write(vb.join("doc.md"), "baseline\nB's line\n").unwrap();
+        std::fs::write(va.join("doc.md"), "A's line\nbaseline\n").unwrap();
+        a.nudge.send(()).await.unwrap();
+
+        wait_until("both edits merge on B", || {
+            let doc = std::fs::read_to_string(vb.join("doc.md")).unwrap_or_default();
+            doc.contains("A's line") && doc.contains("B's line")
+        })
+        .await;
+        // B's fold pushed its line too — A converges to the same bytes.
+        wait_until("replicas converge", || {
+            std::fs::read_to_string(va.join("doc.md")).ok()
+                == std::fs::read_to_string(vb.join("doc.md")).ok()
+        })
+        .await;
+
+        drop(a.nudge);
+        drop(b.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_session_reconnects_with_backoff() {
+        // Reserve an address with no listener yet: the session must keep
+        // retrying with growing backoff instead of dying.
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let url = format!("ws://{addr}/ws");
+
+        let va = temp_dir("reconn-va");
+        std::fs::write(va.join("note.md"), "arrives late\n").unwrap();
+        let code = LiveCode::generate();
+        let a = spawn_live(&va, &code, &url, |c| {
+            c.backoff_min = Duration::from_millis(50);
+            c.backoff_max = Duration::from_millis(200);
+        });
+
+        let mut evs: Vec<LiveEvent> = Vec::new();
+        wait_until("two Disconnected events", || {
+            evs.extend(a.events.try_iter());
+            evs.iter()
+                .filter(|e| matches!(e, LiveEvent::Disconnected { .. }))
+                .count()
+                >= 2
+        })
+        .await;
+        let retries: Vec<Duration> = evs
+            .iter()
+            .filter_map(|e| match e {
+                LiveEvent::Disconnected { retry_in, .. } => Some(*retry_in),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            retries.windows(2).all(|w| w[0] <= w[1]),
+            "backoff never shrinks: {retries:?}"
+        );
+        assert!(retries[1] > retries[0], "backoff grows: {retries:?}");
+
+        // The relay comes up on that very address — the session recovers and
+        // a second device receives the note pushed before any connection.
+        let state = Arc::new(RelayState::new(temp_dir("reconn-data")));
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app(state)).await.unwrap();
+        });
+
+        let vb = temp_dir("reconn-vb");
+        let b = spawn_live(&vb, &code, &url, |_| {});
+        wait_until("late note lands on B", || vb.join("note.md").exists()).await;
+
+        wait_until("A reconnected", || {
+            evs.extend(a.events.try_iter());
+            evs.iter().any(|e| matches!(e, LiveEvent::Connected { .. }))
+        })
+        .await;
+
+        drop(a.nudge);
+        drop(b.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_pass_materializes_crash_leftovers() {
+        let url = spawn_relay(temp_dir("leftover-data")).await;
+        let va = temp_dir("leftover-va");
+        let vb = temp_dir("leftover-vb");
+        std::fs::write(va.join("note.md"), "crash survivor\n").unwrap();
+        let code = LiveCode::generate();
+        let mut a = LiveEngine::open(&va, &code).unwrap();
+        tacitus_sync::client::run_once(&mut a, &url).await.unwrap();
+
+        // B's process "crashes" after receipt: run_once advances the cursor
+        // but nothing materializes.
+        {
+            let mut b = LiveEngine::open(&vb, &code).unwrap();
+            tacitus_sync::client::run_once(&mut b, &url).await.unwrap();
+            assert!(!vb.join("note.md").exists(), "receipt only, no apply yet");
+        }
+
+        // The next pass must write the file even though the relay will never
+        // redeliver below the persisted cursor.
+        let mut b = LiveEngine::open(&vb, &code).unwrap();
+        let mut writer = LiveWriter::new(&vb, LiveScope::ReadWrite);
+        tacitus_sync::client::sync_pass(&mut b, &mut writer, &url)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(vb.join("note.md")).unwrap(),
+            "crash survivor\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_nudge_sender_flushes_pending_applies() {
+        let url = spawn_relay(temp_dir("flush-data")).await;
+        let va = temp_dir("flush-va");
+        let vb = temp_dir("flush-vb");
+        std::fs::write(va.join("note.md"), "must not be lost\n").unwrap();
+        let code = LiveCode::generate();
+
+        // Seed the relay log with a plain one-shot pass from A.
+        let mut a = LiveEngine::open(&va, &code).unwrap();
+        tacitus_sync::client::run_once(&mut a, &url).await.unwrap();
+
+        // B receives the update but the apply debounce is far away — the
+        // clean-shutdown path must flush it to disk before returning.
+        let b = spawn_live(&vb, &code, &url, |c| {
+            c.apply_debounce = Duration::from_secs(3600);
+        });
+        wait_until("B caught up", || {
+            b.events
+                .try_iter()
+                .any(|e| matches!(e, LiveEvent::CaughtUp))
+        })
+        .await;
+
+        drop(b.nudge);
+        b.task.await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(vb.join("note.md")).unwrap(),
+            "must not be lost\n"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_malformed_vault_id_over_ws() {
         let url = spawn_relay(temp_dir("badid")).await;

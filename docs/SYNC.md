@@ -16,7 +16,16 @@ tacitus-mcp sync once --vault ~/vault
 
 # keep syncing in the background (30s scan interval)
 tacitus-mcp sync run --vault ~/vault
+
+# live mode: one persistent relay connection — remote edits land in ~1s
+tacitus-mcp sync run --live --vault ~/vault
 ```
+
+`--live` holds a single WebSocket open instead of a pass every tick: remote
+updates apply within a debounce (~250ms) of arriving, local edits are picked
+up by the scan tick (`--interval`, default 30s — there is no file watcher by
+design). The desktop app uses the same live session and nudges it after
+every save, so app-to-app convergence is sub-second.
 
 Default relay: `wss://sync.tacitus.md` (beta, free). Self-host with
 `--relay wss://your-host` — the relay is `crates/tacitus-relay`
@@ -75,5 +84,7 @@ append-only JSONL log, fsynced; 512 MB cap in beta.
 
 - Don't point sync at a vault that's also inside Dropbox/iCloud sync —
   cooperating writers only.
-- One `sync run` process per vault per device.
+- One sync process per vault per device: don't run `sync run` (live or not)
+  against a vault the desktop app is already live-syncing — two engines
+  race on the same `.tacitus/sync/` state.
 - Compaction isn't implemented yet; very active vaults grow the relay log.

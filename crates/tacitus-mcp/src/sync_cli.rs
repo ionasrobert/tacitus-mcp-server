@@ -2,8 +2,12 @@
 //!
 //!   tacitus-mcp sync init   [--vault <path>] [--relay <url>] [--code <code>]
 //!   tacitus-mcp sync once   [--vault <path>]
-//!   tacitus-mcp sync run    [--vault <path>] [--interval <secs>]
+//!   tacitus-mcp sync run    [--vault <path>] [--interval <secs>] [--live]
 //!   tacitus-mcp sync status [--vault <path>]
+//!
+//! `run --live` holds one persistent relay connection: remote edits land
+//! within ~a second, local edits are picked up by the scan tick
+//! (`--interval`, default 30s — no file watcher by design).
 //!
 //! Config lives in `<vault>/.tacitus/sync/config.json` (owner-only): the
 //! relay URL and the vault code. The code IS the encryption key material —
@@ -32,6 +36,7 @@ pub enum SyncCmd {
     Run {
         vault: PathBuf,
         interval_secs: u64,
+        live: bool,
     },
     Status {
         vault: PathBuf,
@@ -45,6 +50,7 @@ pub fn parse_sync_args(args: &[String]) -> Result<SyncCmd, String> {
     let mut relay = DEFAULT_RELAY.to_string();
     let mut code = None;
     let mut interval_secs = 30u64;
+    let mut live = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -69,6 +75,10 @@ pub fn parse_sync_args(args: &[String]) -> Result<SyncCmd, String> {
                     .map_err(|_| "--interval must be a number of seconds")?;
                 i += 2;
             }
+            "--live" => {
+                live = true;
+                i += 1;
+            }
             other => return Err(format!("unknown sync flag: {other}")),
         }
     }
@@ -79,6 +89,7 @@ pub fn parse_sync_args(args: &[String]) -> Result<SyncCmd, String> {
         "run" => Ok(SyncCmd::Run {
             vault,
             interval_secs,
+            live,
         }),
         "status" => Ok(SyncCmd::Status { vault }),
         other => Err(format!(
@@ -183,15 +194,60 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
         SyncCmd::Run {
             vault,
             interval_secs,
+            live,
         } => {
             let config = load_config(&vault)?;
             let code = VaultCode::parse(&config.vault_code).map_err(|e| e.to_string())?;
             let mut engine = SyncEngine::open(&vault, &code).map_err(|e| e.to_string())?;
+            let mut writer = sync_writer(&vault);
+            if live {
+                use tacitus_sync::{LiveConfig, LiveEvent};
+                let mut live_config = LiveConfig::new(config.relay_url.clone());
+                live_config.scan_interval = std::time::Duration::from_secs(interval_secs);
+                eprintln!(
+                    "live sync on {} — scan every {interval_secs}s (Ctrl-C to stop)",
+                    vault.display()
+                );
+                // Ctrl-C drops the only nudge sender → the session flushes
+                // pending applies and returns Ok — a clean shutdown, not an
+                // abort mid-write.
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+                tokio::spawn(async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    drop(tx);
+                });
+                return tacitus_sync::run_live(
+                    &mut engine,
+                    &mut writer,
+                    &live_config,
+                    &mut rx,
+                    |event| match event {
+                        LiveEvent::Connected { latest_seq } => {
+                            eprintln!("connected (relay at seq {latest_seq})");
+                        }
+                        LiveEvent::CaughtUp => eprintln!("caught up — streaming"),
+                        LiveEvent::Pushed { count } => eprintln!("pushed {count} update(s)"),
+                        LiveEvent::Applied(report) => {
+                            if !report.notes.is_empty() || !report.memories.is_empty() {
+                                eprintln!(
+                                    "applied {} note(s) + {} memory(ies)",
+                                    report.notes.len(),
+                                    report.memories.len()
+                                );
+                            }
+                        }
+                        LiveEvent::Disconnected { reason, retry_in } => {
+                            eprintln!("disconnected: {reason} — retrying in {retry_in:?}");
+                        }
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string());
+            }
             eprintln!(
                 "syncing {} every {interval_secs}s (Ctrl-C to stop)",
                 vault.display()
             );
-            let mut writer = sync_writer(&vault);
             client::run_forever(
                 &mut engine,
                 &mut writer,
@@ -250,7 +306,17 @@ mod tests {
             SyncCmd::Run {
                 vault: PathBuf::from("."),
                 interval_secs: 5,
+                live: false,
             }
+        );
+        assert_eq!(
+            parse_sync_args(&s(&["run", "--live", "--interval", "2"])).unwrap(),
+            SyncCmd::Run {
+                vault: PathBuf::from("."),
+                interval_secs: 2,
+                live: true,
+            },
+            "--live keeps a persistent session; --interval becomes the scan tick"
         );
         assert_eq!(
             parse_sync_args(&s(&["status"])).unwrap(),

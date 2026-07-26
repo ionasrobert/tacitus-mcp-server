@@ -31,7 +31,7 @@ fn net_err(e: impl std::fmt::Display) -> SyncError {
     }
 }
 
-fn ws_url(relay_url: &str) -> String {
+pub(crate) fn ws_url(relay_url: &str) -> String {
     let base = relay_url.trim_end_matches('/');
     if base.ends_with("/ws") {
         base.to_string()
@@ -42,7 +42,7 @@ fn ws_url(relay_url: &str) -> String {
 
 /// rustls 0.23 needs a process-level crypto provider before the first TLS
 /// handshake (wss://). Tests use plain ws://, so only real relays hit this.
-fn ensure_crypto_provider() {
+pub(crate) fn ensure_crypto_provider() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -134,7 +134,12 @@ pub async fn sync_pass(
     relay_url: &str,
 ) -> Result<PassReport, SyncError> {
     let run = run_once(engine, relay_url).await?;
-    let apply = engine.apply_dirty(writer, &run.dirty_items)?;
+    // The persisted apply queue is a superset of this run's dirty items —
+    // it also carries anything an earlier crash received but never wrote
+    // (the relay won't redeliver below the cursor, so this is the only
+    // remaining trigger).
+    let dirty = engine.pending_apply();
+    let apply = engine.apply_dirty(writer, &dirty)?;
     Ok(PassReport { run, apply })
 }
 

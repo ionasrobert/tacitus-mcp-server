@@ -4,6 +4,7 @@
 //! here — tests drive it through an in-memory fake relay, and the real
 //! WebSocket driver (feature "client") is a thin loop around these calls.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,11 @@ pub struct SyncEngine {
     pub(crate) docs: DocStore,
     outbox: Outbox,
     last_seq: u64,
+    /// Items received from the relay but not yet materialized to the vault.
+    /// Persisted (apply_queue.json) because the cursor advances on receipt:
+    /// the relay never redelivers below it, so a crash between receipt and
+    /// apply would otherwise lose the file write forever.
+    pending_apply: BTreeSet<String>,
 }
 
 fn random_device_id() -> String {
@@ -84,6 +90,13 @@ impl SyncEngine {
             cursor.device_id.clone()
         };
 
+        let pending_apply: BTreeSet<String> =
+            match fs::read_to_string(sync_dir.join("apply_queue.json")) {
+                Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
+                Err(e) => return Err(SyncError::io(e)),
+            };
+
         let engine = Self {
             sync_dir,
             vault_dir: vault_dir.to_path_buf(),
@@ -93,6 +106,7 @@ impl SyncEngine {
             docs,
             outbox,
             last_seq: cursor.last_seq,
+            pending_apply,
         };
         engine.persist_cursor()?;
         Ok(engine)
@@ -110,6 +124,35 @@ impl SyncEngine {
         let tmp = self.sync_dir.join(".cursor.json.tmp");
         fs::write(&tmp, json).map_err(SyncError::io)?;
         fs::rename(&tmp, self.sync_dir.join("cursor.json")).map_err(SyncError::io)
+    }
+
+    fn persist_pending_apply(&self) -> Result<(), SyncError> {
+        let json = serde_json::to_string(&self.pending_apply).map_err(|e| SyncError {
+            code: "INTERNAL",
+            reason: e.to_string(),
+        })?;
+        let tmp = self.sync_dir.join(".apply_queue.json.tmp");
+        fs::write(&tmp, json).map_err(SyncError::io)?;
+        fs::rename(&tmp, self.sync_dir.join("apply_queue.json")).map_err(SyncError::io)
+    }
+
+    /// Items received but not yet materialized — the caller unions these into
+    /// its next apply so a crash between receipt and apply loses nothing.
+    pub fn pending_apply(&self) -> Vec<String> {
+        self.pending_apply.iter().cloned().collect()
+    }
+
+    /// Applied (or deliberately skipped) keys leave the queue; the fold path
+    /// owns recovery for skips.
+    pub(crate) fn clear_pending_apply(&mut self, keys: &[String]) -> Result<(), SyncError> {
+        let before = self.pending_apply.len();
+        for key in keys {
+            self.pending_apply.remove(key);
+        }
+        if self.pending_apply.len() != before {
+            self.persist_pending_apply()?;
+        }
+        Ok(())
     }
 
     pub fn vault_id(&self) -> &str {
@@ -210,6 +253,13 @@ impl SyncEngine {
                             .map_err(SyncError::io)?;
                         effect.dirty_items.push(update.doc.clone());
                     }
+                }
+                // Queue before cursor: a crash in between redelivers the
+                // Update (idempotent); the other order loses it forever.
+                if !effect.dirty_items.is_empty() {
+                    self.pending_apply
+                        .extend(effect.dirty_items.iter().cloned());
+                    self.persist_pending_apply()?;
                 }
                 self.last_seq = seq;
                 self.persist_cursor()?;
