@@ -149,8 +149,15 @@ pub struct SyncPayload {
     pub updates: Vec<DocUpdate>,
 }
 
-/// Encrypt a payload: `nonce(24) || ciphertext`, AAD = vault_id.
-pub fn seal(key: &[u8; 32], vault_id: &str, payload: &SyncPayload) -> Result<Vec<u8>, SyncError> {
+/// Encrypt a payload: `nonce(24) || ciphertext`. `aad` binds the blob to
+/// its domain — sync updates pass the vault_id, presence passes
+/// `"{vault_id}#presence"` — so a blob can never be replayed across
+/// message types (AEAD failure, not just a parse error).
+pub fn seal<T: serde::Serialize>(
+    key: &[u8; 32],
+    aad: &str,
+    payload: &T,
+) -> Result<Vec<u8>, SyncError> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
@@ -163,7 +170,7 @@ pub fn seal(key: &[u8; 32], vault_id: &str, payload: &SyncPayload) -> Result<Vec
             XNonce::from_slice(&nonce),
             AeadPayload {
                 msg: &msg,
-                aad: vault_id.as_bytes(),
+                aad: aad.as_bytes(),
             },
         )
         .map_err(|_| SyncError {
@@ -176,8 +183,13 @@ pub fn seal(key: &[u8; 32], vault_id: &str, payload: &SyncPayload) -> Result<Vec
     Ok(blob)
 }
 
-/// Decrypt and authenticate a blob; rejects tampering and wrong keys.
-pub fn open(key: &[u8; 32], vault_id: &str, blob: &[u8]) -> Result<SyncPayload, SyncError> {
+/// Decrypt and authenticate a blob; rejects tampering, wrong keys, and
+/// blobs sealed under a different AAD domain.
+pub fn open<T: serde::de::DeserializeOwned>(
+    key: &[u8; 32],
+    aad: &str,
+    blob: &[u8],
+) -> Result<T, SyncError> {
     if blob.len() <= NONCE_LEN {
         return Err(SyncError {
             code: "CRYPTO",
@@ -191,7 +203,7 @@ pub fn open(key: &[u8; 32], vault_id: &str, blob: &[u8]) -> Result<SyncPayload, 
             XNonce::from_slice(nonce),
             AeadPayload {
                 msg: ct,
-                aad: vault_id.as_bytes(),
+                aad: aad.as_bytes(),
             },
         )
         .map_err(|_| SyncError {
@@ -217,6 +229,28 @@ mod tests {
                 u: vec![1, 2, 3, 4],
             }],
         }
+    }
+
+    #[test]
+    fn aad_domains_are_cryptographically_separated() {
+        let key = [7u8; 32];
+        let blob = seal(&key, "vid", &payload()).unwrap();
+        // Same key, different AAD domain → AEAD failure (a sync blob can
+        // never be replayed as a presence blob), not a mere parse error.
+        let err = open::<SyncPayload>(&key, "vid#presence", &blob).unwrap_err();
+        assert_eq!(err.code, "CRYPTO");
+        assert!(err.reason.contains("decryption failed"));
+
+        // And an arbitrary payload type round-trips under its own domain.
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Tiny {
+            x: u8,
+        }
+        let blob = seal(&key, "vid#presence", &Tiny { x: 9 }).unwrap();
+        assert_eq!(
+            open::<Tiny>(&key, "vid#presence", &blob).unwrap(),
+            Tiny { x: 9 }
+        );
     }
 
     #[test]
@@ -264,7 +298,7 @@ mod tests {
     fn seal_open_roundtrips() {
         let keys = derive_keys(&VaultCode::generate());
         let blob = seal(&keys.vault_key, &keys.vault_id, &payload()).unwrap();
-        let opened = open(&keys.vault_key, &keys.vault_id, &blob).unwrap();
+        let opened: SyncPayload = open(&keys.vault_key, &keys.vault_id, &blob).unwrap();
         assert_eq!(opened.device, "dev_test");
         assert_eq!(opened.updates[0].doc, "n:projects/launch");
         assert_eq!(opened.updates[0].u, vec![1, 2, 3, 4]);
@@ -276,7 +310,7 @@ mod tests {
         let mut blob = seal(&keys.vault_key, &keys.vault_id, &payload()).unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 0xff;
-        assert!(open(&keys.vault_key, &keys.vault_id, &blob).is_err());
+        assert!(open::<SyncPayload>(&keys.vault_key, &keys.vault_id, &blob).is_err());
     }
 
     #[test]
@@ -284,6 +318,6 @@ mod tests {
         let keys = derive_keys(&VaultCode::generate());
         let other = derive_keys(&VaultCode::generate());
         let blob = seal(&keys.vault_key, &keys.vault_id, &payload()).unwrap();
-        assert!(open(&other.vault_key, &keys.vault_id, &blob).is_err());
+        assert!(open::<SyncPayload>(&other.vault_key, &keys.vault_id, &blob).is_err());
     }
 }

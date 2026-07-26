@@ -208,10 +208,10 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
                     "live sync on {} — scan every {interval_secs}s (Ctrl-C to stop)",
                     vault.display()
                 );
-                // Ctrl-C drops the only nudge sender → the session flushes
-                // pending applies and returns Ok — a clean shutdown, not an
-                // abort mid-write.
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+                // Ctrl-C drops the only cmd sender → the session says
+                // goodbye, flushes pending applies and returns Ok — a clean
+                // shutdown, not an abort mid-write.
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<tacitus_sync::LiveCmd>(4);
                 tokio::spawn(async move {
                     let _ = tokio::signal::ctrl_c().await;
                     drop(tx);
@@ -238,6 +238,24 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
                         }
                         LiveEvent::Disconnected { reason, retry_in } => {
                             eprintln!("disconnected: {reason} — retrying in {retry_in:?}");
+                        }
+                        LiveEvent::Peers(peers) => {
+                            if peers.is_empty() {
+                                eprintln!("no other devices online");
+                            } else {
+                                let list: Vec<String> = peers
+                                    .iter()
+                                    .map(|p| {
+                                        let device = &p.device[..p.device.len().min(12)];
+                                        match &p.note_id {
+                                            Some(n) if p.editing => format!("{device} ✎ {n}"),
+                                            Some(n) => format!("{device} → {n}"),
+                                            None => device.to_string(),
+                                        }
+                                    })
+                                    .collect();
+                                eprintln!("{} device(s) online: {}", peers.len(), list.join(", "));
+                            }
                         }
                     },
                 )

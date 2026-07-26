@@ -15,6 +15,11 @@ use crate::log::VaultLog;
 pub struct VaultHub {
     pub log: Mutex<VaultLog>,
     pub tx: broadcast::Sender<(u64, Vec<u8>)>,
+    /// Ephemeral presence fanout: raw base64 blobs, never logged, never
+    /// sequenced. Separate from `tx` so presence chatter can't evict update
+    /// entries (their Lagged recoveries differ: updates resync from the
+    /// log, presence just drops).
+    pub presence: broadcast::Sender<String>,
 }
 
 pub struct RelayState {
@@ -37,9 +42,11 @@ impl RelayState {
         }
         let log = VaultLog::open(&self.data_dir, vault_id)?;
         let (tx, _) = broadcast::channel(256);
+        let (presence, _) = broadcast::channel(64);
         let hub = Arc::new(VaultHub {
             log: Mutex::new(log),
             tx,
+            presence,
         });
         vaults.insert(vault_id.to_string(), hub.clone());
         Ok(hub)

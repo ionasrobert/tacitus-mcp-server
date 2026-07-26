@@ -29,6 +29,15 @@ use hub::{valid_vault_id, RelayState, VaultHub};
 // The wire protocol, mirrored from tacitus-sync/src/protocol.rs (the relay
 // deliberately does not depend on the sync crate — it must never be able to
 // read payloads, and the compiler enforcing that is worth a few lines).
+/// Extensions this relay speaks; advertised in every Welcome. Presence
+/// frames are only ever SENT to connections whose Hello asked for the cap —
+/// an old client can never receive a tag it can't parse.
+const RELAY_CAPS: [&str; 1] = ["presence"];
+
+/// Presence blobs are ephemeral (never logged) so the log cap doesn't bound
+/// them — this does. Real payloads are ~300 bytes.
+const PRESENCE_MAX_B64_LEN: usize = 8 * 1024;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum ClientMsg {
@@ -36,19 +45,25 @@ enum ClientMsg {
         vault_id: String,
         token: String,
         since_seq: u64,
+        #[serde(default)]
+        caps: Vec<String>,
     },
     Push {
         blob: String, // base64 — kept opaque, decoded only for storage
     },
+    /// Ephemeral: fanned out to the vault's presence-capable connections,
+    /// never logged, never sequenced, never acked.
+    Presence { blob: String },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum ServerMsg {
-    Welcome { latest_seq: u64 },
+    Welcome { latest_seq: u64, caps: Vec<String> },
     Update { seq: u64, blob: String },
     Ack { seq: u64 },
     Err { code: String, msg: String },
+    Presence { blob: String },
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -95,6 +110,18 @@ async fn reject(mut socket: WebSocket, code: &str, msg: &str) {
     .await;
 }
 
+/// Await a presence frame when subscribed; pend forever when not. Lets the
+/// select! below stay guard-free (an unsubscribed connection simply never
+/// completes this arm).
+async fn recv_presence(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<String>>,
+) -> Result<String, tokio::sync::broadcast::error::RecvError> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
     // First frame must be a Hello.
     let hello = loop {
@@ -104,7 +131,8 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                     vault_id,
                     token,
                     since_seq,
-                }) => break (vault_id, token, since_seq),
+                    caps,
+                }) => break (vault_id, token, since_seq, caps),
                 Ok(_) => return reject(socket, "protocol", "hello must come first").await,
                 Err(_) => return reject(socket, "protocol", "malformed frame").await,
             },
@@ -112,7 +140,8 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
             _ => return,
         }
     };
-    let (vault_id, token, since_seq) = hello;
+    let (vault_id, token, since_seq, caps) = hello;
+    let wants_presence = caps.iter().any(|c| c == "presence");
 
     if !valid_vault_id(&vault_id) {
         return reject(
@@ -139,8 +168,10 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
     }
 
     // Subscribe BEFORE reading the backlog so nothing lands in the gap;
-    // `last_sent` dedups the overlap.
+    // `last_sent` dedups the overlap. Presence subscription doubles as the
+    // capability gate: unsubscribed connections can never receive the tag.
     let mut rx = hub.tx.subscribe();
+    let mut presence_rx = wants_presence.then(|| hub.presence.subscribe());
     let (latest_seq, backlog) = {
         let log = hub.log.lock().await;
         (log.last_seq(), log.read_since(since_seq))
@@ -152,7 +183,11 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
             return reject(socket, "storage", "backlog read failed").await;
         }
     };
-    if !send(&mut socket, &ServerMsg::Welcome { latest_seq }).await {
+    let welcome = ServerMsg::Welcome {
+        latest_seq,
+        caps: RELAY_CAPS.iter().map(|c| c.to_string()).collect(),
+    };
+    if !send(&mut socket, &welcome).await {
         return;
     }
     let mut last_sent = since_seq;
@@ -211,6 +246,19 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                                     }
                                 }
                             }
+                            Ok(ClientMsg::Presence { blob }) => {
+                                // Ephemeral: no log, no fsync, no seq, no
+                                // ack — fan out (sender included; clients
+                                // filter their own device) and forget.
+                                if blob.len() > PRESENCE_MAX_B64_LEN {
+                                    let _ = send(&mut socket, &ServerMsg::Err {
+                                        code: "protocol".into(),
+                                        msg: "presence blob too large".into(),
+                                    }).await;
+                                } else {
+                                    let _ = hub.presence.send(blob);
+                                }
+                            }
                             Ok(ClientMsg::Hello { .. }) => {
                                 let _ = send(&mut socket, &ServerMsg::Err {
                                     code: "protocol".into(),
@@ -262,6 +310,18 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                             }
                         }
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            presence = recv_presence(&mut presence_rx) => {
+                match presence {
+                    Ok(blob) => {
+                        if !send(&mut socket, &ServerMsg::Presence { blob }).await {
+                            return;
+                        }
+                    }
+                    // Ephemeral: nothing to resync on lag — just drop.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -355,6 +415,19 @@ mod tests {
 
     fn hello(vault_id: &str, token: &str, since_seq: u64) -> serde_json::Value {
         serde_json::json!({ "t": "hello", "vault_id": vault_id, "token": token, "since_seq": since_seq })
+    }
+
+    fn hello_caps(vault_id: &str, token: &str, since_seq: u64) -> serde_json::Value {
+        serde_json::json!({
+            "t": "hello", "vault_id": vault_id, "token": token,
+            "since_seq": since_seq, "caps": ["presence"],
+        })
+    }
+
+    fn presence_frame(payload: &[u8]) -> serde_json::Value {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        serde_json::json!({ "t": "presence", "blob": STANDARD.encode(payload) })
     }
 
     fn push(blob: &[u8]) -> serde_json::Value {
@@ -512,8 +585,10 @@ mod tests {
 
     use std::sync::mpsc as std_mpsc;
     use tacitus_core::vault::{NoteWriter as LiveWriter, PermissionScope as LiveScope};
-    use tacitus_sync::live::{run_live, LiveConfig, LiveEvent};
-    use tacitus_sync::{SyncEngine as LiveEngine, SyncError, VaultCode as LiveCode};
+    use tacitus_sync::live::{run_live, LiveCmd, LiveConfig, LiveEvent};
+    use tacitus_sync::{
+        Peer, PresenceState, SyncEngine as LiveEngine, SyncError, VaultCode as LiveCode,
+    };
 
     /// Poll until `cond` holds — deadline-capped, never a fixed sleep.
     async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -528,7 +603,7 @@ mod tests {
     }
 
     struct Live {
-        nudge: tokio::sync::mpsc::Sender<()>,
+        nudge: tokio::sync::mpsc::Sender<LiveCmd>,
         events: std_mpsc::Receiver<LiveEvent>,
         task: tokio::task::JoinHandle<Result<(), SyncError>>,
     }
@@ -573,7 +648,7 @@ mod tests {
 
         // Type on A, nudge — B's DISK converges with no pass cadence at all.
         std::fs::write(va.join("note.md"), "typed on A\n").unwrap();
-        a.nudge.send(()).await.unwrap();
+        a.nudge.send(LiveCmd::Nudge).await.unwrap();
         wait_until("note lands on B", || vb.join("note.md").exists()).await;
         assert_eq!(
             std::fs::read_to_string(vb.join("note.md")).unwrap(),
@@ -631,7 +706,7 @@ mod tests {
 
         // Converge on a shared baseline.
         std::fs::write(va.join("doc.md"), "baseline\n").unwrap();
-        a.nudge.send(()).await.unwrap();
+        a.nudge.send(LiveCmd::Nudge).await.unwrap();
         wait_until("baseline lands on B", || {
             std::fs::read_to_string(vb.join("doc.md")).ok().as_deref() == Some("baseline\n")
         })
@@ -643,7 +718,7 @@ mod tests {
         // stale fold erasing A's line).
         std::fs::write(vb.join("doc.md"), "baseline\nB's line\n").unwrap();
         std::fs::write(va.join("doc.md"), "A's line\nbaseline\n").unwrap();
-        a.nudge.send(()).await.unwrap();
+        a.nudge.send(LiveCmd::Nudge).await.unwrap();
 
         wait_until("both edits merge on B", || {
             let doc = std::fs::read_to_string(vb.join("doc.md")).unwrap_or_default();
@@ -726,6 +801,179 @@ mod tests {
         b.task.await.unwrap().unwrap();
     }
 
+    fn viewing(note: &str, editing: bool) -> PresenceState {
+        PresenceState {
+            note_id: Some(note.into()),
+            editing,
+        }
+    }
+
+    /// Drain a Live's events, keeping the newest Peers snapshot.
+    fn latest_peers(live: &Live, current: &mut Vec<Peer>) {
+        for event in live.events.try_iter() {
+            if let LiveEvent::Peers(peers) = event {
+                *current = peers;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_presence_discovers_tracks_and_says_goodbye() {
+        let url = spawn_relay(temp_dir("pres-live")).await;
+        let va = temp_dir("pres-live-a");
+        let vb = temp_dir("pres-live-b");
+        let code = LiveCode::generate();
+        // Heartbeats deliberately SLOW: discovery must come from the
+        // hello-reply, goodbye from the explicit gone — never from cadence.
+        let slow_beat = |c: &mut LiveConfig| {
+            c.presence_interval = Duration::from_secs(10);
+            c.presence_ttl = Duration::from_secs(60);
+            c.presence_debounce = Duration::from_millis(20);
+        };
+
+        let a = spawn_live(&va, &code, &url, slow_beat);
+        a.nudge
+            .send(LiveCmd::Presence(viewing("plan", true)))
+            .await
+            .unwrap();
+
+        // B joins later — the announce/hello-reply handshake makes A
+        // visible fast, long before any heartbeat.
+        let b = spawn_live(&vb, &code, &url, slow_beat);
+        let mut peers: Vec<Peer> = Vec::new();
+        wait_until("B discovers A editing plan", || {
+            latest_peers(&b, &mut peers);
+            peers.len() == 1 && peers[0].note_id.as_deref() == Some("plan") && peers[0].editing
+        })
+        .await;
+
+        // A burst of note switches converges to the last one.
+        for i in 0..5 {
+            a.nudge
+                .send(LiveCmd::Presence(viewing(&format!("n{i}"), false)))
+                .await
+                .unwrap();
+        }
+        wait_until("B converges to the last state", || {
+            latest_peers(&b, &mut peers);
+            peers.len() == 1 && peers[0].note_id.as_deref() == Some("n4") && !peers[0].editing
+        })
+        .await;
+
+        // Clean shutdown sends gone — B empties long before the 60s TTL.
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+        wait_until("A's goodbye empties B's peers", || {
+            latest_peers(&b, &mut peers);
+            peers.is_empty()
+        })
+        .await;
+
+        drop(b.nudge);
+        b.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn crashed_peer_expires_via_ttl_sweep() {
+        let url = spawn_relay(temp_dir("pres-ttl")).await;
+        let va = temp_dir("pres-ttl-a");
+        let vb = temp_dir("pres-ttl-b");
+        let code = LiveCode::generate();
+        let fast = |c: &mut LiveConfig| {
+            c.presence_interval = Duration::from_millis(100);
+            c.presence_ttl = Duration::from_millis(400);
+            c.presence_debounce = Duration::from_millis(10);
+        };
+
+        let a = spawn_live(&va, &code, &url, fast);
+        let b = spawn_live(&vb, &code, &url, fast);
+        a.nudge
+            .send(LiveCmd::Presence(viewing("x", false)))
+            .await
+            .unwrap();
+        let mut peers: Vec<Peer> = Vec::new();
+        wait_until("B sees A", || {
+            latest_peers(&b, &mut peers);
+            peers.len() == 1
+        })
+        .await;
+
+        // Hard crash: no goodbye ever arrives — only the TTL can clean up.
+        a.task.abort();
+        let _ = a.task.await;
+        wait_until("TTL sweep drops the silent peer", || {
+            latest_peers(&b, &mut peers);
+            peers.is_empty()
+        })
+        .await;
+
+        drop(b.nudge);
+        b.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_relay_receives_zero_presence_frames() {
+        // A hand-rolled 0.19-style relay: Welcome WITHOUT caps. The client
+        // must never send a presence frame at it, no matter what the host
+        // asks for.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = std_mpsc::channel::<String>();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut sink, mut frames) = ws.split();
+            while let Some(Ok(frame)) = frames.next().await {
+                if let WsMessage::Text(text) = frame {
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let tag = v["t"].as_str().unwrap_or("?").to_string();
+                    let is_hello = tag == "hello";
+                    let _ = seen_tx.send(tag);
+                    if is_hello {
+                        let welcome = r#"{"t":"welcome","latest_seq":0}"#;
+                        sink.send(WsMessage::Text(welcome.to_string().into()))
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        });
+
+        let va = temp_dir("old-relay-va");
+        std::fs::write(va.join("note.md"), "content\n").unwrap();
+        let code = LiveCode::generate();
+        let a = spawn_live(&va, &code, &format!("ws://{addr}/ws"), |c| {
+            // Aggressive timings: if presence WERE wrongly enabled, frames
+            // would show up within the assertion window many times over.
+            c.presence_interval = Duration::from_millis(50);
+            c.presence_debounce = Duration::from_millis(10);
+        });
+        a.nudge
+            .send(LiveCmd::Presence(viewing("secret", true)))
+            .await
+            .unwrap();
+
+        let mut seen: Vec<String> = Vec::new();
+        wait_until("stub saw hello + the initial push", || {
+            seen.extend(seen_rx.try_iter());
+            seen.contains(&"hello".to_string()) && seen.contains(&"push".to_string())
+        })
+        .await;
+        // Negative window: ~6 would-be heartbeat intervals of silence.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        while tokio::time::Instant::now() < deadline {
+            seen.extend(seen_rx.try_iter());
+            assert!(
+                !seen.iter().any(|t| t == "presence"),
+                "presence leaked to an old relay: {seen:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn sync_pass_materializes_crash_leftovers() {
         let url = spawn_relay(temp_dir("leftover-data")).await;
@@ -787,6 +1035,103 @@ mod tests {
             std::fs::read_to_string(vb.join("note.md")).unwrap(),
             "must not be lost\n"
         );
+    }
+
+    #[tokio::test]
+    async fn presence_fans_out_only_to_capable_and_never_touches_the_log() {
+        let url = spawn_relay(temp_dir("pres-fan")).await;
+        let vault = "d".repeat(32);
+
+        let mut a = connect(&url).await;
+        send_json(&mut a, hello_caps(&vault, "tok", 0)).await;
+        let welcome = recv_json(&mut a).await;
+        assert_eq!(welcome["t"], "welcome");
+        assert!(
+            welcome["caps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "presence"),
+            "relay advertises the capability: {welcome}"
+        );
+        let mut b = connect(&url).await;
+        send_json(&mut b, hello_caps(&vault, "tok", 0)).await;
+        recv_json(&mut b).await;
+        // C is a 0.19 client: no caps field at all.
+        let mut c = connect(&url).await;
+        send_json(&mut c, hello(&vault, "tok", 0)).await;
+        recv_json(&mut c).await;
+
+        // A: one presence frame, then one push.
+        send_json(&mut a, presence_frame(b"ciphertext-here")).await;
+        send_json(&mut a, push(b"real-update")).await;
+
+        // B (capable) sees both the presence frame and the update; their
+        // relative order is a select race between the two broadcast
+        // channels. The update carries seq 1 — presence consumed no
+        // sequence number.
+        let one = recv_json(&mut b).await;
+        let two = recv_json(&mut b).await;
+        let mut tags = [one["t"].as_str().unwrap(), two["t"].as_str().unwrap()];
+        tags.sort_unstable();
+        assert_eq!(tags, ["presence", "update"]);
+        let update = if one["t"] == "update" { &one } else { &two };
+        assert_eq!(update["seq"], 1);
+
+        // C (old): the FIRST frame it ever receives is the update — the
+        // unknown tag never reaches it.
+        let frame = recv_json(&mut c).await;
+        assert_eq!(frame["t"], "update");
+        assert_eq!(frame["seq"], 1);
+
+        // A gets its own presence echo and the push ack (their relative
+        // order is a select race — the ack is sent inline, the echo rides
+        // the broadcast arm), but never a presence ACK.
+        let one = recv_json(&mut a).await;
+        let two = recv_json(&mut a).await;
+        let mut tags = [one["t"].as_str().unwrap(), two["t"].as_str().unwrap()];
+        tags.sort_unstable();
+        assert_eq!(tags, ["ack", "presence"]);
+        let ack = if one["t"] == "ack" { &one } else { &two };
+        assert_eq!(ack["seq"], 1, "the only ack is the push's");
+
+        // A late joiner replays a log that contains ONLY the push.
+        let mut late = connect(&url).await;
+        send_json(&mut late, hello(&vault, "tok", 0)).await;
+        let welcome = recv_json(&mut late).await;
+        assert_eq!(welcome["latest_seq"], 1, "presence never entered the log");
+        assert_eq!(recv_json(&mut late).await["t"], "update");
+    }
+
+    #[tokio::test]
+    async fn presence_before_hello_is_rejected() {
+        let url = spawn_relay(temp_dir("pres-early")).await;
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, presence_frame(b"x")).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "protocol");
+    }
+
+    #[tokio::test]
+    async fn oversized_presence_is_dropped_but_the_connection_survives() {
+        let url = spawn_relay(temp_dir("pres-big")).await;
+        let vault = "e".repeat(32);
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_caps(&vault, "tok", 0)).await;
+        recv_json(&mut ws).await; // welcome
+
+        let big = vec![0u8; 9 * 1024];
+        send_json(&mut ws, presence_frame(&big)).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "protocol");
+
+        // Same connection still syncs fine.
+        send_json(&mut ws, push(b"still alive")).await;
+        // (own presence echo was never sent — the blob was dropped)
+        let frame = recv_json(&mut ws).await;
+        assert_eq!(frame["t"], "ack");
     }
 
     #[tokio::test]

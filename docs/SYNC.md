@@ -71,14 +71,35 @@ use: versioned in `.tacitus/history/`, revertible, and audited with
 `origin: "sync"`. Bulk bootstrap (>200 notes) bypasses history and records
 one line in `.tacitus/sync/sync.log`.
 
+## Presence (who's online)
+
+Devices in a vault see each other live: online, which note, editing or
+not. Presence is **ephemeral** — it never enters the relay log, carries no
+sequence number, and gets no ack. Payloads are E2E-encrypted like updates,
+under a separate AAD domain (`"{vault_id}#presence"`), so the relay learns
+nothing and a sync blob can never be replayed as presence. Departure is a
+`gone` goodbye on clean shutdown, or a 45s TTL when a device crashes.
+Requires a 0.20+ relay; against an older relay presence is silently off
+(sync itself is unaffected — see compatibility below).
+
 ## Protocol (for relay implementers)
 
 WebSocket, JSON text frames, blobs base64. Client → `hello {vault_id,
-token, since_seq}`; server → `welcome {latest_seq}` + backlog `update {seq,
-blob}`… then live updates. Client `push {blob}` → `ack {seq}` + fanout to
-ALL of the vault's connections, pusher included (cursors advance only
-through the update stream). Auth is trust-on-first-use per vault. Per-vault
-append-only JSONL log, fsynced; 512 MB cap in beta.
+token, since_seq, caps}`; server → `welcome {latest_seq, caps}` + backlog
+`update {seq, blob}`… then live updates. Client `push {blob}` → `ack {seq}`
++ fanout to ALL of the vault's connections, pusher included (cursors
+advance only through the update stream). Auth is trust-on-first-use per
+vault. Per-vault append-only JSONL log, fsynced; 512 MB cap in beta.
+
+**Extensions & compatibility:** new message *variants* are parse errors for
+old peers, so they are capability-gated: a client lists what it speaks in
+`hello.caps`, the relay lists what it supports in `welcome.caps` (both
+fields default to empty — 0.19 peers interoperate untouched). `presence
+{blob}` (both directions) is the first extension: the relay fans it out
+ONLY to connections that advertised the cap, never logs it, never assigns a
+seq, never acks it, and drops blobs over 8 KiB. Clients skip well-formed
+frames with unknown tags instead of dying, so future extensions stay
+deployable.
 
 ## Caveats
 

@@ -21,7 +21,8 @@ use tacitus_core::vault::NoteWriter;
 use crate::apply::ApplyReport;
 use crate::client::{ensure_crypto_provider, ws_url};
 use crate::engine::SyncEngine;
-use crate::protocol::{ClientMsg, ServerMsg};
+use crate::presence::{Peer, PeerTracker, PresenceState};
+use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_PRESENCE};
 use crate::SyncError;
 
 /// Tunables for a live session. Every timing is injectable so tests never
@@ -44,6 +45,13 @@ pub struct LiveConfig {
     pub liveness_timeout: Duration,
     pub backoff_min: Duration,
     pub backoff_max: Duration,
+    /// Presence heartbeat cadence (also sweeps expired peers).
+    pub presence_interval: Duration,
+    /// A peer silent for this long is considered gone (crashed — no goodbye).
+    pub presence_ttl: Duration,
+    /// Trailing debounce for state changes (rapid note switching collapses
+    /// to the last state; hello-replies ride the same debounce).
+    pub presence_debounce: Duration,
 }
 
 impl LiveConfig {
@@ -57,8 +65,22 @@ impl LiveConfig {
             liveness_timeout: Duration::from_secs(90),
             backoff_min: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
+            presence_interval: Duration::from_secs(15),
+            presence_ttl: Duration::from_secs(45),
+            presence_debounce: Duration::from_millis(300),
         }
     }
+}
+
+/// What the host sends into a live session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveCmd {
+    /// A local write happened — scan and push now.
+    Nudge,
+    /// Our presence changed (note opened/closed, editing started/stopped).
+    /// Stored even while presence is off (old relay) — it lights up on the
+    /// first capable session.
+    Presence(PresenceState),
 }
 
 /// What the session surfaces to its host (status bar, CLI output).
@@ -78,6 +100,10 @@ pub enum LiveEvent {
         reason: String,
         retry_in: Duration,
     },
+    /// The visible peer set changed (join, state change, goodbye, expiry) —
+    /// also re-emitted unconditionally after every reconnect so hosts can
+    /// repaint. Empty when presence is off (old relay).
+    Peers(Vec<Peer>),
 }
 
 /// Pure backoff progression: min on the first failure, doubling to max.
@@ -160,16 +186,32 @@ where
     Ok(())
 }
 
+/// Presence bookkeeping that outlives a single connection: our own state
+/// (so it re-announces after a reconnect) and the peer map (so the badge
+/// doesn't blank out during a blip).
+struct PresenceCtx {
+    state: PresenceState,
+    peers: PeerTracker,
+}
+
+/// When a debounced presence send should fire.
+fn debounced_at(last_sent: Option<Instant>, debounce: Duration) -> Instant {
+    match last_sent {
+        None => Instant::now(),
+        Some(t) => Instant::now().max(t + debounce),
+    }
+}
+
 /// Run a persistent live session: connect, stream, apply, reconnect with
-/// backoff on network failure — forever. Returns `Ok(())` when every nudge
-/// sender is dropped (clean shutdown; pending applies are flushed first).
-/// Non-network errors (auth, log_full, local IO/write failures) return
-/// `Err` — the host decides what to tell the user.
+/// backoff on network failure — forever. Returns `Ok(())` when every cmd
+/// sender is dropped (clean shutdown; a goodbye is sent and pending applies
+/// are flushed first). Non-network errors (auth, log_full, local IO/write
+/// failures) return `Err` — the host decides what to tell the user.
 pub async fn run_live<F>(
     engine: &mut SyncEngine,
     writer: &mut NoteWriter,
     config: &LiveConfig,
-    nudge: &mut mpsc::Receiver<()>,
+    cmds: &mut mpsc::Receiver<LiveCmd>,
     mut on_event: F,
 ) -> Result<(), SyncError>
 where
@@ -177,8 +219,22 @@ where
 {
     ensure_crypto_provider();
     let mut backoff: Option<Duration> = None;
+    let mut presence = PresenceCtx {
+        state: PresenceState::default(),
+        peers: PeerTracker::new(config.presence_ttl),
+    };
     loop {
-        match session(engine, writer, config, nudge, &mut backoff, &mut on_event).await? {
+        match session(
+            engine,
+            writer,
+            config,
+            cmds,
+            &mut backoff,
+            &mut presence,
+            &mut on_event,
+        )
+        .await?
+        {
             SessionEnd::Shutdown => return Ok(()),
             SessionEnd::Network(reason) => {
                 let retry = next_backoff(backoff, config);
@@ -189,15 +245,25 @@ where
                 });
                 tokio::select! {
                     _ = tokio::time::sleep(retry) => {}
-                    n = nudge.recv() => {
-                        if n.is_none() {
-                            // Shutting down while disconnected: anything
-                            // received but unapplied is in the persisted
-                            // queue — flush it now.
-                            flush_pending(engine, writer, &mut on_event)?;
-                            return Ok(());
+                    cmd = cmds.recv() => {
+                        match cmd {
+                            None => {
+                                // Shutting down while disconnected: no
+                                // socket for a goodbye (peers expire via
+                                // TTL); anything received but unapplied is
+                                // in the persisted queue — flush it now.
+                                flush_pending(engine, writer, &mut on_event)?;
+                                return Ok(());
+                            }
+                            Some(LiveCmd::Presence(state)) => {
+                                // Remember the newest state for the next
+                                // session's announce, then retry right away.
+                                presence.state = state;
+                            }
+                            Some(LiveCmd::Nudge) => {
+                                // A local change while down → retry now.
+                            }
                         }
-                        // A local change while down → retry right away.
                     }
                 }
             }
@@ -209,8 +275,9 @@ async fn session<F>(
     engine: &mut SyncEngine,
     writer: &mut NoteWriter,
     config: &LiveConfig,
-    nudge: &mut mpsc::Receiver<()>,
+    cmds: &mut mpsc::Receiver<LiveCmd>,
     backoff: &mut Option<Duration>,
+    presence: &mut PresenceCtx,
     on_event: &mut F,
 ) -> Result<SessionEnd, SyncError>
 where
@@ -239,6 +306,13 @@ where
     let mut last_scan = Instant::now();
     let mut next_scan = Instant::now() + config.scan_interval;
     let mut next_ping = Instant::now() + config.ping_interval;
+    // Presence is off until the Welcome advertises the capability (an old
+    // relay never does — zero presence bytes leave this client then).
+    let mut presence_on = false;
+    let mut next_presence = Instant::now() + config.presence_interval;
+    let mut presence_dirty = false;
+    let mut presence_send_at = Instant::now();
+    let mut last_presence_sent: Option<Instant> = None;
     // Anything left over from a crash (or an earlier failed session) gets
     // applied on the first debounce tick.
     let mut apply_deadline: Option<Instant> = if engine.pending_apply().is_empty() {
@@ -265,16 +339,50 @@ where
                     }
                     _ => continue,
                 };
-                let msg: ServerMsg = match serde_json::from_str(&text) {
-                    Ok(msg) => msg,
+                let msg: ServerMsg = match parse_server_msg(&text) {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => continue, // a future protocol frame — skip, don't die
                     Err(e) => return Ok(SessionEnd::Network(format!("bad frame: {e}"))),
                 };
-                if let ServerMsg::Welcome { latest_seq } = &msg {
+                // Presence is ephemeral and never touches the engine: decode,
+                // fold into the peer map, surface changes, move on.
+                if let ServerMsg::Presence { blob } = &msg {
+                    if let Some(payload) = engine.open_presence(blob) {
+                        if payload.hello && !payload.gone && presence_on {
+                            // A newcomer asked who's here — reply with our
+                            // state through the normal debounce (N hellos in
+                            // a window collapse to one reply; replies never
+                            // set hello, so no loops).
+                            presence_dirty = true;
+                            presence_send_at =
+                                debounced_at(last_presence_sent, config.presence_debounce);
+                        }
+                        if presence.peers.observe(&payload, std::time::Instant::now()) {
+                            on_event(LiveEvent::Peers(presence.peers.snapshot()));
+                        }
+                    }
+                    continue;
+                }
+                if let ServerMsg::Welcome { latest_seq, caps } = &msg {
                     *backoff = None;
                     target = Some(*latest_seq);
+                    presence_on = caps.iter().any(|c| c == CAP_PRESENCE);
                     on_event(LiveEvent::Connected {
                         latest_seq: *latest_seq,
                     });
+                    if presence_on {
+                        // Announce ourselves; hello=true asks peers to
+                        // answer so a fresh device discovers everyone fast.
+                        let frame = engine.seal_presence(&presence.state, true, false)?;
+                        if let Some(reason) = send_all(&mut sink, &[frame]).await? {
+                            return Ok(SessionEnd::Network(reason));
+                        }
+                        last_presence_sent = Some(Instant::now());
+                        next_presence = Instant::now() + config.presence_interval;
+                    }
+                    // Unconditional snapshot: hosts repaint after reconnect
+                    // or webview reload even when nothing changed.
+                    on_event(LiveEvent::Peers(presence.peers.snapshot()));
                 }
                 // Fold-before-apply: local disk state enters the CRDT before
                 // this update does, so concurrent edits merge instead of the
@@ -301,20 +409,78 @@ where
                     }
                 }
             }
-            n = nudge.recv() => {
-                match n {
+            cmd = cmds.recv() => {
+                match cmd {
                     None => {
+                        // Goodbye first (peers drop us immediately instead
+                        // of waiting out the TTL); errors don't matter,
+                        // we're leaving. flush_pending never touches the
+                        // sink, so the ordering is safe.
+                        if presence_on {
+                            if let Ok(frame) = engine.seal_presence(&presence.state, false, true) {
+                                let _ = send_all(&mut sink, &[frame]).await;
+                            }
+                        }
                         flush_pending(engine, writer, on_event)?;
                         let _ = sink.send(Message::Close(None)).await;
                         return Ok(SessionEnd::Shutdown);
                     }
-                    Some(()) => {
-                        while nudge.try_recv().is_ok() {} // coalesce bursts
-                        if let Some(reason) = fold_and_push(engine, &mut sink, on_event).await? {
-                            return Ok(SessionEnd::Network(reason));
+                    Some(first) => {
+                        // Coalesce the burst WITHOUT swallowing presence:
+                        // fold every queued cmd into (nudged, newest state).
+                        let mut nudged = false;
+                        let mut new_state: Option<PresenceState> = None;
+                        for cmd in std::iter::once(first)
+                            .chain(std::iter::from_fn(|| cmds.try_recv().ok()))
+                        {
+                            match cmd {
+                                LiveCmd::Nudge => nudged = true,
+                                LiveCmd::Presence(state) => new_state = Some(state),
+                            }
                         }
-                        last_scan = Instant::now();
+                        if let Some(state) = new_state {
+                            if state != presence.state {
+                                presence.state = state;
+                                if presence_on {
+                                    presence_dirty = true;
+                                    presence_send_at = debounced_at(
+                                        last_presence_sent,
+                                        config.presence_debounce,
+                                    );
+                                }
+                            }
+                        }
+                        if nudged {
+                            if let Some(reason) =
+                                fold_and_push(engine, &mut sink, on_event).await?
+                            {
+                                return Ok(SessionEnd::Network(reason));
+                            }
+                            last_scan = Instant::now();
+                        }
                     }
+                }
+            }
+            _ = tokio::time::sleep_until(presence_send_at), if presence_on && presence_dirty => {
+                presence_dirty = false;
+                let frame = engine.seal_presence(&presence.state, false, false)?;
+                if let Some(reason) = send_all(&mut sink, &[frame]).await? {
+                    return Ok(SessionEnd::Network(reason));
+                }
+                last_presence_sent = Some(Instant::now());
+                // A state send doubles as a heartbeat.
+                next_presence = Instant::now() + config.presence_interval;
+            }
+            _ = tokio::time::sleep_until(next_presence), if presence_on => {
+                next_presence = Instant::now() + config.presence_interval;
+                presence_dirty = false;
+                let frame = engine.seal_presence(&presence.state, false, false)?;
+                if let Some(reason) = send_all(&mut sink, &[frame]).await? {
+                    return Ok(SessionEnd::Network(reason));
+                }
+                last_presence_sent = Some(Instant::now());
+                if presence.peers.sweep(std::time::Instant::now()) {
+                    on_event(LiveEvent::Peers(presence.peers.snapshot()));
                 }
             }
             _ = tokio::time::sleep_until(apply_at), if apply_deadline.is_some() => {
@@ -377,5 +543,21 @@ mod tests {
         );
         assert!(config.liveness_timeout >= Duration::from_secs(60));
         assert!(config.backoff_min < config.backoff_max);
+        assert!(
+            config.presence_ttl >= config.presence_interval * 3,
+            "a peer survives two lost heartbeats before expiring"
+        );
+        assert!(config.presence_debounce < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn debounced_send_fires_now_when_idle_and_trails_when_busy() {
+        let debounce = Duration::from_millis(300);
+        let now = Instant::now();
+        assert!(debounced_at(None, debounce) <= Instant::now());
+        let recent = Some(now);
+        assert!(debounced_at(recent, debounce) >= now + debounce);
+        let long_ago = Some(now - Duration::from_secs(10));
+        assert!(debounced_at(long_ago, debounce) <= Instant::now());
     }
 }

@@ -10,7 +10,7 @@ use tacitus_core::vault::NoteWriter;
 
 use crate::apply::ApplyReport;
 use crate::engine::SyncEngine;
-use crate::protocol::{ClientMsg, ServerMsg};
+use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg};
 use crate::SyncError;
 
 /// How long we wait for the relay to say something before deciding the
@@ -100,8 +100,12 @@ pub async fn run_once(engine: &mut SyncEngine, relay_url: &str) -> Result<RunRep
             }
             _ => continue,
         };
-        let msg: ServerMsg = serde_json::from_str(&text).map_err(net_err)?;
-        if let ServerMsg::Welcome { latest_seq } = &msg {
+        let msg: ServerMsg = match parse_server_msg(&text) {
+            Ok(Some(msg)) => msg,
+            Ok(None) => continue, // a future protocol frame — skip it
+            Err(e) => return Err(net_err(e)),
+        };
+        if let ServerMsg::Welcome { latest_seq, .. } = &msg {
             // Our own pushes land after latest_seq; their echoes advance the
             // cursor past it, so catching up to the pre-push tip suffices.
             target = Some(*latest_seq);

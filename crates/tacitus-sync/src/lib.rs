@@ -16,6 +16,7 @@ pub mod live;
 pub mod manifest;
 pub mod merge;
 pub mod outbox;
+pub mod presence;
 pub mod protocol;
 pub mod scan;
 pub mod state;
@@ -24,7 +25,9 @@ pub use crypto::{derive_keys, DocUpdate, Keys, SyncPayload, VaultCode};
 pub use docs::{DocStore, MANIFEST_KEY};
 pub use engine::{EngineEffect, Flag, SyncEngine};
 #[cfg(feature = "client")]
-pub use live::{run_live, LiveConfig, LiveEvent};
+pub use live::{run_live, LiveCmd, LiveConfig, LiveEvent};
+pub use presence::{Peer, PeerTracker, PresencePayload, PresenceState};
+pub use protocol::CAP_PRESENCE;
 pub use protocol::{ClientMsg, ServerMsg};
 pub use scan::{scan, ItemKind, ScanDelta, ScanItem};
 pub use state::{ItemState, ShadowState};

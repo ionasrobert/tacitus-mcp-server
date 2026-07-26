@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::{self, DocUpdate, Keys, SyncPayload, VaultCode};
 use crate::docs::DocStore;
 use crate::outbox::Outbox;
-use crate::protocol::{ClientMsg, ServerMsg};
+use crate::presence::{presence_aad, PresencePayload, PresenceState};
+use crate::protocol::{ClientMsg, ServerMsg, CAP_PRESENCE};
 use crate::scan::scan;
 use crate::state::ShadowState;
 use crate::SyncError;
@@ -168,12 +169,56 @@ impl SyncEngine {
     }
 
     /// The connection opener; `since_seq` resumes from the persisted cursor.
+    /// Always advertises the extensions this client understands — the relay
+    /// only sends extension frames to connections that asked for them.
     pub fn hello(&self) -> ClientMsg {
         ClientMsg::Hello {
             vault_id: self.keys.vault_id.clone(),
             token: self.keys.auth_token.clone(),
             since_seq: self.last_seq,
+            caps: vec![CAP_PRESENCE.to_string()],
         }
+    }
+
+    /// Seal our presence for the wire (fills in device id + wall-clock ts).
+    /// `hello` asks peers to announce themselves back; `gone` is the goodbye.
+    pub fn seal_presence(
+        &self,
+        state: &PresenceState,
+        hello: bool,
+        gone: bool,
+    ) -> Result<ClientMsg, SyncError> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let payload = PresencePayload {
+            v: 1,
+            device: self.device_id.clone(),
+            ts,
+            hello,
+            gone,
+            state: state.clone(),
+        };
+        let blob = crypto::seal(
+            &self.keys.vault_key,
+            &presence_aad(&self.keys.vault_id),
+            &payload,
+        )?;
+        Ok(ClientMsg::Presence { blob })
+    }
+
+    /// Decode a presence frame. `None` = our own echo, or anything that
+    /// fails to authenticate or parse — presence is ephemeral, a bad frame
+    /// is never worth killing a session over.
+    pub fn open_presence(&self, blob: &[u8]) -> Option<PresencePayload> {
+        let payload: PresencePayload = crypto::open(
+            &self.keys.vault_key,
+            &presence_aad(&self.keys.vault_id),
+            blob,
+        )
+        .ok()?;
+        (payload.device != self.device_id).then_some(payload)
     }
 
     /// Everything still unacked — re-sent after (re)connecting, in order.
@@ -245,7 +290,8 @@ impl SyncEngine {
                 if seq <= self.last_seq {
                     return Ok(effect); // already seen (at-least-once delivery)
                 }
-                let payload = crypto::open(&self.keys.vault_key, &self.keys.vault_id, &blob)?;
+                let payload: SyncPayload =
+                    crypto::open(&self.keys.vault_key, &self.keys.vault_id, &blob)?;
                 if payload.device != self.device_id {
                     for update in &payload.updates {
                         self.docs
@@ -269,6 +315,10 @@ impl SyncEngine {
                     code: "RELAY",
                     reason: format!("{code}: {msg}"),
                 });
+            }
+            ServerMsg::Presence { .. } => {
+                // Ephemeral — the live driver intercepts presence before
+                // calling the engine; pass-based drivers simply ignore it.
             }
         }
         Ok(effect)
@@ -359,7 +409,7 @@ mod tests {
         };
         // The blob decrypts with the vault key and names the note inside.
         let keys = crypto::derive_keys(&code);
-        let payload = crypto::open(&keys.vault_key, &keys.vault_id, blob).unwrap();
+        let payload: SyncPayload = crypto::open(&keys.vault_key, &keys.vault_id, blob).unwrap();
         assert_eq!(payload.updates.len(), 1);
         assert_eq!(payload.updates[0].doc, "n:note");
         // Nothing changed → nothing pushed.
@@ -500,6 +550,74 @@ mod tests {
     }
 
     #[test]
+    fn hello_advertises_presence_capability() {
+        let dir = temp_vault("caps");
+        let engine = SyncEngine::open(&dir, &VaultCode::generate()).unwrap();
+        let ClientMsg::Hello { caps, .. } = engine.hello() else {
+            panic!("hello is hello");
+        };
+        assert!(caps.iter().any(|c| c == CAP_PRESENCE));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn presence_roundtrips_between_devices_and_filters_own_echo() {
+        let da = temp_vault("pres-a");
+        let db = temp_vault("pres-b");
+        let code = VaultCode::generate();
+        let a = SyncEngine::open(&da, &code).unwrap();
+        let b = SyncEngine::open(&db, &code).unwrap();
+
+        let state = PresenceState {
+            note_id: Some("projects/launch".into()),
+            editing: true,
+        };
+        let ClientMsg::Presence { blob } = a.seal_presence(&state, true, false).unwrap() else {
+            panic!("expected a presence frame");
+        };
+
+        // The other device reads it…
+        let payload = b.open_presence(&blob).expect("decodes on B");
+        assert_eq!(payload.device, a.device_id());
+        assert!(payload.hello && !payload.gone);
+        assert!(payload.ts > 0);
+        assert_eq!(payload.state, state);
+        // …the sender's own echo is filtered…
+        assert!(a.open_presence(&blob).is_none(), "own echo → None");
+        // …tampering is rejected quietly…
+        let mut bad = blob.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
+        assert!(b.open_presence(&bad).is_none());
+        // …and a SYNC blob can't cross into the presence domain (AAD).
+        fs::write(da.join("note.md"), "x\n").unwrap();
+        let mut a = a;
+        let pushes = a.tick_scan().unwrap();
+        let ClientMsg::Push { blob: sync_blob } = &pushes[0] else {
+            panic!("expected a push");
+        };
+        assert!(b.open_presence(sync_blob).is_none());
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn presence_frames_are_noops_for_the_engine() {
+        let dir = temp_vault("pres-noop");
+        let mut engine = SyncEngine::open(&dir, &VaultCode::generate()).unwrap();
+        let before = engine.last_seq();
+        let effect = engine
+            .on_server_msg(ServerMsg::Presence {
+                blob: vec![1, 2, 3],
+            })
+            .unwrap();
+        assert!(effect.outbound.is_empty());
+        assert!(effect.dirty_items.is_empty());
+        assert_eq!(engine.last_seq(), before, "no cursor movement");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn outbox_repushes_unacked_after_restart() {
         let dir = temp_vault("outbox");
         fs::write(dir.join("pending.md"), "not yet acked\n").unwrap();
@@ -516,7 +634,10 @@ mod tests {
 
         // A Welcome after reconnect re-sends it; an ack clears it.
         let effect = engine
-            .on_server_msg(ServerMsg::Welcome { latest_seq: 0 })
+            .on_server_msg(ServerMsg::Welcome {
+                latest_seq: 0,
+                caps: vec![],
+            })
             .unwrap();
         assert_eq!(effect.outbound.len(), 1);
         engine.on_server_msg(ServerMsg::Ack { seq: 1 }).unwrap();
