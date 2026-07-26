@@ -1230,7 +1230,7 @@ mod tests {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "durable tier never delivered; got: {:?}…",
-                &text.chars().take(40).collect::<String>()
+                text.chars().take(40).collect::<String>()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
