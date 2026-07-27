@@ -1889,4 +1889,163 @@ mod tests {
             .any(|e| matches!(e, LiveEvent::Compacted { .. }));
         assert!(compacted, "the session surfaced the Compacted event");
     }
+
+    // ---- durable mirror + witness (collab-m4) --------------------------
+
+    /// Room-enter both sides and bootstrap their FrontDocs. Assumes the
+    /// baseline note already synced to both vaults.
+    async fn enter_rooms(a: &Live, b: &Live) -> (FrontDoc, FrontDoc) {
+        for live in [a, b] {
+            live.nudge
+                .send(LiveCmd::RoomEnter {
+                    note_id: "doc".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let (mut feed_a, mut feed_b) = (RoomFeed::default(), RoomFeed::default());
+        wait_until("both get RoomState", || {
+            drain_room(a, &mut feed_a);
+            drain_room(b, &mut feed_b);
+            !feed_a.states.is_empty() && !feed_b.states.is_empty()
+        })
+        .await;
+        (
+            FrontDoc::new(&feed_a.states[0].1),
+            FrontDoc::new(&feed_b.states[0].1),
+        )
+    }
+
+    fn log_lines(data: &std::path::Path, vault_id: &str) -> usize {
+        std::fs::read_to_string(data.join(vault_id).join("log.jsonl"))
+            .map(|raw| raw.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn durable_flush_skips_when_peer_echo_already_landed() {
+        let data = temp_dir("mirror-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("mirror-va");
+        let vb = temp_dir("mirror-vb");
+        std::fs::write(va.join("doc.md"), "base\n").unwrap();
+        let code = LiveCode::generate();
+        let vault_id = LiveEngine::open(&va, &code).unwrap().vault_id().to_string();
+
+        // A checkpoints fast; B's own debounce is slow, so B's flush (as
+        // witness, 3×) fires well AFTER A's durable echo reached it.
+        let a = spawn_live(&va, &code, &url, |c| {
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(60);
+        });
+        let b = spawn_live(&vb, &code, &url, |c| {
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(150);
+        });
+        wait_until("baseline lands on B", || vb.join("doc.md").exists()).await;
+        let (mut front_a, _front_b) = enter_rooms(&a, &b).await;
+
+        // A types; its checkpoint lands durably (one new log entry).
+        let update = front_a.insert(0, "typed on A ");
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update,
+            })
+            .await
+            .unwrap();
+        let before = log_lines(&data, &vault_id);
+        wait_until("A's checkpoint lands in the log", || {
+            log_lines(&data, &vault_id) > before
+        })
+        .await;
+        let after_a = log_lines(&data, &vault_id);
+
+        // B saw the keystrokes ephemerally (witness armed) AND the durable
+        // echo (mirror advanced) — its flush must find nothing to push.
+        // Negative window: > B's witness deadline (3 × 150ms).
+        wait_until("B materializes the edit", || {
+            std::fs::read_to_string(vb.join("doc.md"))
+                .map(|t| t.contains("typed on A "))
+                .unwrap_or(false)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            log_lines(&data, &vault_id),
+            after_a,
+            "the witness re-logged a checkpoint the author already pushed"
+        );
+
+        drop(a.nudge);
+        drop(b.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+        // Even the shutdown flushes stayed empty — nothing left to log.
+        assert_eq!(log_lines(&data, &vault_id), after_a);
+    }
+
+    #[tokio::test]
+    async fn witness_persists_peer_keystrokes_when_author_dies() {
+        let data = temp_dir("witness-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("witness-va");
+        let vb = temp_dir("witness-vb");
+        let vc = temp_dir("witness-vc");
+        std::fs::write(va.join("doc.md"), "base\n").unwrap();
+        let code = LiveCode::generate();
+        let vault_id = LiveEngine::open(&va, &code).unwrap().vault_id().to_string();
+
+        // The author's own debounce is effectively infinite — any durable
+        // copy of its keystrokes can only come from the witness.
+        let a = spawn_live(&va, &code, &url, |c| {
+            c.coedit_durable_debounce = Duration::from_secs(600);
+        });
+        let b = spawn_live(&vb, &code, &url, |c| {
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(80);
+        });
+        wait_until("baseline lands on B", || vb.join("doc.md").exists()).await;
+        let (mut front_a, _front_b) = enter_rooms(&a, &b).await;
+
+        let before = log_lines(&data, &vault_id);
+        let update = front_a.insert(0, "doomed author typed ");
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update,
+            })
+            .await
+            .unwrap();
+        // B applies the ephemeral frame to its disk…
+        wait_until("B materializes the ephemeral edit", || {
+            std::fs::read_to_string(vb.join("doc.md"))
+                .map(|t| t.contains("doomed author typed "))
+                .unwrap_or(false)
+        })
+        .await;
+        // …and the author crashes before ever flushing durably (its own
+        // debounce is 600s, so any new log entry is the witness's).
+        a.task.abort();
+        let _ = a.task.await;
+
+        // The witness's deadline (3 × 80ms) checkpoints the edit for it.
+        wait_until("the witness flushes the peer's keystrokes", || {
+            log_lines(&data, &vault_id) > before
+        })
+        .await;
+
+        // A device that reads ONLY the durable log converges with the dead
+        // author's text — the edit exists beyond RAM and B's disk.
+        let mut c = LiveEngine::open(&vc, &code).unwrap();
+        tacitus_sync::client::run_once(&mut c, &url).await.unwrap();
+        assert!(c
+            .materialize("n:doc")
+            .unwrap()
+            .expect("doc exists")
+            .contains("doomed author typed "));
+
+        drop(b.nudge);
+        b.task.await.unwrap().unwrap();
+    }
 }

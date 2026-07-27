@@ -17,12 +17,12 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 use tacitus_core::vault::NoteWriter;
-use yrs::StateVector;
 
 use crate::apply::ApplyReport;
 use crate::client::{connect_ws, ensure_crypto_provider};
 use crate::coedit::CoeditKind;
 use crate::crypto::DocUpdate;
+use crate::docs::MirrorDoc;
 use crate::engine::SyncEngine;
 use crate::presence::{Peer, PeerTracker, PresenceState};
 use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
@@ -218,20 +218,17 @@ where
     let (pushes, updates) = engine.tick_scan_with_updates()?;
     if let Some(room) = room {
         let key = room.doc_key();
-        let mut folded_room = false;
         for update in &updates {
             if update.doc == key {
-                folded_room = true;
+                // The scan push carries this fold durably — the mirror
+                // advances by exactly these bytes, unflushed keystrokes
+                // stay outside it.
+                room.mirror.apply(&update.u).map_err(SyncError::io)?;
                 on_event(LiveEvent::CoeditUpdate {
                     note_id: room.note_id.clone(),
                     update: update.u.clone(),
                 });
             }
-        }
-        if folded_room && !room.durable_dirty {
-            // The scan push already carries this fold durably.
-            let (_, checkpoint) = engine.coedit_diff(&room.note_id, &room.checkpoint)?;
-            room.checkpoint = checkpoint;
         }
     }
     if pushes.is_empty() {
@@ -272,12 +269,14 @@ struct PresenceCtx {
     peers: PeerTracker,
 }
 
-/// An open co-editing room: which note, and how far the durable log has
-/// been advanced (checkpoint). Survives reconnects.
+/// An open co-editing room: which note, and the durable frontier (a mirror
+/// doc holding exactly what the log covers — see `MirrorDoc`). Survives
+/// reconnects.
 struct RoomCtx {
     note_id: String,
-    checkpoint: StateVector,
-    /// Local room edits not yet flushed to the durable tier.
+    mirror: MirrorDoc,
+    /// Room edits (ours, or a peer's seen only ephemerally — the witness
+    /// duty) not yet flushed to the durable tier.
     durable_dirty: bool,
 }
 
@@ -293,18 +292,20 @@ struct LiveState {
     room: Option<RoomCtx>,
 }
 
-/// Push the room's advance-since-checkpoint into the durable log (outbox —
-/// crash-safe even when the returned frames can't be sent right now).
+/// Push the room's advance past the durable frontier into the log (outbox —
+/// crash-safe even when the returned frames can't be sent right now). When
+/// a peer's own checkpoint echo already landed, the diff against the mirror
+/// is empty and nothing is re-logged (that's the point of the mirror).
 fn flush_room_durable(
     engine: &mut SyncEngine,
     room: &mut RoomCtx,
 ) -> Result<Vec<ClientMsg>, SyncError> {
-    let (diff, checkpoint) = engine.coedit_diff(&room.note_id, &room.checkpoint)?;
-    room.checkpoint = checkpoint;
+    let (diff, _) = engine.coedit_diff(&room.note_id, &room.mirror.sv())?;
     room.durable_dirty = false;
     if diff.is_empty() {
         return Ok(Vec::new());
     }
+    room.mirror.apply(&diff).map_err(SyncError::io)?;
     engine.push_updates(vec![DocUpdate {
         doc: room.doc_key(),
         u: diff,
@@ -391,11 +392,11 @@ where
                                 // in the crash-safe outbox), hand the local
                                 // doc state over, co-edit locally.
                                 let _ = engine.tick_scan_with_updates()?;
-                                let (state, checkpoint, _) =
-                                    engine.coedit_enter_state(&note_id)?;
+                                let (state, _, _) = engine.coedit_enter_state(&note_id)?;
                                 ctx.room = Some(RoomCtx {
                                     note_id: note_id.clone(),
-                                    checkpoint,
+                                    mirror: MirrorDoc::from_state(&state)
+                                        .map_err(SyncError::io)?,
                                     durable_dirty: false,
                                 });
                                 on_event(LiveEvent::RoomState { note_id, state });
@@ -544,6 +545,23 @@ where
                                         note_id: coedit.note_id,
                                         update: coedit.data,
                                     });
+                                    // Witness duty: if the author dies
+                                    // before its own durable debounce, WE
+                                    // checkpoint what we saw ephemerally.
+                                    // Longer deadline so the author usually
+                                    // wins — its echo empties our diff and
+                                    // the flush no-ops. Never DELAY an
+                                    // earlier armed deadline.
+                                    if let Some(room) = &mut ctx.room {
+                                        let witness_at = Instant::now()
+                                            + config.coedit_durable_debounce * 3;
+                                        durable_at = if room.durable_dirty {
+                                            durable_at.min(witness_at)
+                                        } else {
+                                            witness_at
+                                        };
+                                        room.durable_dirty = true;
+                                    }
                                 }
                             }
                             CoeditKind::Awareness => {
@@ -617,12 +635,15 @@ where
                     apply_deadline = Some(Instant::now() + config.apply_debounce);
                 }
                 // Durable updates for the room note (a peer's checkpoint
-                // push, a pass-based device's scan) reach the frontend doc
-                // too — idempotent for anything it already saw ephemerally.
-                if let Some(room) = &ctx.room {
+                // push, a pass-based device's scan, a snapshot) reach the
+                // frontend doc too — idempotent for anything it already saw
+                // ephemerally — and advance the durable mirror: our next
+                // flush must not re-log what the peer just checkpointed.
+                if let Some(room) = &mut ctx.room {
                     let key = room.doc_key();
                     for update in &effect.updates {
                         if update.doc == key {
+                            room.mirror.apply(&update.u).map_err(SyncError::io)?;
                             on_event(LiveEvent::CoeditUpdate {
                                 note_id: room.note_id.clone(),
                                 update: update.u.clone(),
@@ -709,7 +730,7 @@ where
                                         return Ok(SessionEnd::Network(reason));
                                     }
                                     last_scan = Instant::now();
-                                    let (state, checkpoint, bootstrap) =
+                                    let (state, _, bootstrap) =
                                         engine.coedit_enter_state(&note_id)?;
                                     if let Some(reason) =
                                         send_all(&mut sink, &bootstrap).await?
@@ -718,7 +739,8 @@ where
                                     }
                                     ctx.room = Some(RoomCtx {
                                         note_id: note_id.clone(),
-                                        checkpoint,
+                                        mirror: MirrorDoc::from_state(&state)
+                                            .map_err(SyncError::io)?,
                                         durable_dirty: false,
                                     });
                                     on_event(LiveEvent::RoomState { note_id, state });
