@@ -270,6 +270,14 @@ impl DocStore {
         Ok(Some(text.get_string(&txn)))
     }
 
+    /// Full compacted state of the tombstone manifest. Its own accessor:
+    /// routing "manifest" through `load()` would cache a SECOND manifest doc
+    /// under the item key (encode_key("manifest") == the manifest's file),
+    /// silently divergent from `self.manifest`.
+    pub fn manifest_state(&self) -> Vec<u8> {
+        full_state(&self.manifest)
+    }
+
     /// Every item this store has a doc for (from disk — survives restarts).
     pub fn known_items(&self) -> io::Result<Vec<String>> {
         let mut items = Vec::new();
@@ -288,10 +296,78 @@ impl DocStore {
     }
 }
 
+/// The durable frontier of a co-editing room: a second, minimal doc that
+/// applies ONLY content that reached (or is queued for) the relay log —
+/// peer checkpoint echoes, scan folds, our own flushed diffs. Diffing the
+/// live doc against `sv()` yields exactly what the log still misses, so a
+/// flush never re-logs what a peer already checkpointed durably.
+pub struct MirrorDoc {
+    doc: Doc,
+}
+
+impl MirrorDoc {
+    pub fn from_state(state: &[u8]) -> io::Result<Self> {
+        let doc = byte_doc();
+        if !state.is_empty() {
+            apply_update_bytes(&doc, state)?;
+        }
+        Ok(Self { doc })
+    }
+
+    pub fn apply(&mut self, update: &[u8]) -> io::Result<()> {
+        apply_update_bytes(&self.doc, update)
+    }
+
+    pub fn sv(&self) -> StateVector {
+        self.doc.transact().state_vector()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mirror_doc_tracks_durable_frontier() {
+        let (dir, mut store) = temp_store("mirror");
+        store.apply_local_text("n:m", "hello\n").unwrap();
+        let state = store.full_state_of("n:m").unwrap().expect("doc exists");
+
+        // A mirror built from the full state covers everything: no diff.
+        let mut mirror = MirrorDoc::from_state(&state).unwrap();
+        assert!(store.diff_since("n:m", &mirror.sv()).unwrap().is_empty());
+
+        // The live doc advances → the diff is exactly the gap; applying it
+        // to the mirror closes the gap again.
+        store.apply_local_text("n:m", "hello\nworld\n").unwrap();
+        let diff = store.diff_since("n:m", &mirror.sv()).unwrap();
+        assert!(!diff.is_empty());
+        mirror.apply(&diff).unwrap();
+        assert!(store.diff_since("n:m", &mirror.sv()).unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_state_does_not_pollute_the_item_cache() {
+        let (dir, mut store) = temp_store("manifest-state");
+        store.apply_local_text("n:x", "content\n").unwrap();
+        store.record_delete("n:x").unwrap();
+
+        // The manifest's full state carries the tombstone to a replica…
+        let (rdir, mut replica) = temp_store("manifest-state-replica");
+        let state = store.full_state_of("n:x").unwrap().unwrap();
+        replica.apply_remote("n:x", &state).unwrap();
+        replica
+            .apply_remote(MANIFEST_KEY, &store.manifest_state())
+            .unwrap();
+        assert_eq!(replica.materialize("n:x").unwrap(), None, "stays deleted");
+
+        // …and the accessor never creates an ITEM doc named "manifest".
+        assert!(store.known_items().unwrap() == vec!["n:x".to_string()]);
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&rdir).ok();
+    }
 
     #[test]
     fn state_helpers_expose_full_state_vector_and_incremental_diff() {

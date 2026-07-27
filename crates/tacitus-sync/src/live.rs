@@ -17,15 +17,15 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 use tacitus_core::vault::NoteWriter;
-use yrs::StateVector;
 
 use crate::apply::ApplyReport;
-use crate::client::{ensure_crypto_provider, ws_url};
+use crate::client::{connect_ws, ensure_crypto_provider};
 use crate::coedit::CoeditKind;
 use crate::crypto::DocUpdate;
+use crate::docs::MirrorDoc;
 use crate::engine::SyncEngine;
 use crate::presence::{Peer, PeerTracker, PresenceState};
-use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_PRESENCE};
+use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
 use crate::SyncError;
 
 /// The relay drops ephemeral frames whose base64 exceeds 8 KiB — anything
@@ -71,6 +71,9 @@ pub struct LiveConfig {
     /// keystrokes travel ephemerally, then land in the relay log in one
     /// batched diff after this much quiet.
     pub coedit_durable_debounce: Duration,
+    /// When the Welcome reports a relay log bigger than this, a caught-up
+    /// session offers a compaction snapshot (once per session). 0 disables.
+    pub compact_threshold: u64,
 }
 
 impl LiveConfig {
@@ -88,6 +91,7 @@ impl LiveConfig {
             presence_ttl: Duration::from_secs(45),
             presence_debounce: Duration::from_millis(300),
             coedit_durable_debounce: Duration::from_secs(2),
+            compact_threshold: 4 * 1024 * 1024,
         }
     }
 }
@@ -151,6 +155,10 @@ pub enum LiveEvent {
         note_id: String,
         data: Vec<u8>,
     },
+    /// The relay accepted our compaction snapshot and truncated its log.
+    Compacted {
+        upto_seq: u64,
+    },
 }
 
 /// Pure backoff progression: min on the first failure, doubling to max.
@@ -210,20 +218,17 @@ where
     let (pushes, updates) = engine.tick_scan_with_updates()?;
     if let Some(room) = room {
         let key = room.doc_key();
-        let mut folded_room = false;
         for update in &updates {
             if update.doc == key {
-                folded_room = true;
+                // The scan push carries this fold durably — the mirror
+                // advances by exactly these bytes, unflushed keystrokes
+                // stay outside it.
+                room.mirror.apply(&update.u).map_err(SyncError::io)?;
                 on_event(LiveEvent::CoeditUpdate {
                     note_id: room.note_id.clone(),
                     update: update.u.clone(),
                 });
             }
-        }
-        if folded_room && !room.durable_dirty {
-            // The scan push already carries this fold durably.
-            let (_, checkpoint) = engine.coedit_diff(&room.note_id, &room.checkpoint)?;
-            room.checkpoint = checkpoint;
         }
     }
     if pushes.is_empty() {
@@ -239,7 +244,10 @@ where
 }
 
 /// Materialize everything in the persisted apply queue (crash-safe source
-/// of truth for "received but not yet on disk").
+/// of truth for "received but not yet on disk"). Items that arrived through
+/// co-editing keystrokes commit as their own batch attributed "coedit" in
+/// the audit log — the host's Activity view distinguishes room edits from
+/// plain sync applies.
 fn flush_pending<F>(
     engine: &mut SyncEngine,
     writer: &mut NoteWriter,
@@ -249,8 +257,24 @@ where
     F: FnMut(LiveEvent),
 {
     let dirty = engine.pending_apply();
-    if !dirty.is_empty() {
-        let report = engine.apply_dirty(writer, &dirty)?;
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    let (coedit, rest): (Vec<String>, Vec<String>) = dirty
+        .into_iter()
+        .partition(|key| engine.is_pending_coedit(key));
+    if !coedit.is_empty() {
+        let prev: Option<String> = writer.origin().map(str::to_string);
+        writer.set_origin("coedit");
+        let result = engine.apply_dirty(writer, &coedit);
+        match prev {
+            Some(p) => writer.set_origin(p),
+            None => writer.clear_origin(),
+        }
+        on_event(LiveEvent::Applied(result?));
+    }
+    if !rest.is_empty() {
+        let report = engine.apply_dirty(writer, &rest)?;
         on_event(LiveEvent::Applied(report));
     }
     Ok(())
@@ -264,12 +288,14 @@ struct PresenceCtx {
     peers: PeerTracker,
 }
 
-/// An open co-editing room: which note, and how far the durable log has
-/// been advanced (checkpoint). Survives reconnects.
+/// An open co-editing room: which note, and the durable frontier (a mirror
+/// doc holding exactly what the log covers — see `MirrorDoc`). Survives
+/// reconnects.
 struct RoomCtx {
     note_id: String,
-    checkpoint: StateVector,
-    /// Local room edits not yet flushed to the durable tier.
+    mirror: MirrorDoc,
+    /// Room edits (ours, or a peer's seen only ephemerally — the witness
+    /// duty) not yet flushed to the durable tier.
     durable_dirty: bool,
 }
 
@@ -285,18 +311,20 @@ struct LiveState {
     room: Option<RoomCtx>,
 }
 
-/// Push the room's advance-since-checkpoint into the durable log (outbox —
-/// crash-safe even when the returned frames can't be sent right now).
+/// Push the room's advance past the durable frontier into the log (outbox —
+/// crash-safe even when the returned frames can't be sent right now). When
+/// a peer's own checkpoint echo already landed, the diff against the mirror
+/// is empty and nothing is re-logged (that's the point of the mirror).
 fn flush_room_durable(
     engine: &mut SyncEngine,
     room: &mut RoomCtx,
 ) -> Result<Vec<ClientMsg>, SyncError> {
-    let (diff, checkpoint) = engine.coedit_diff(&room.note_id, &room.checkpoint)?;
-    room.checkpoint = checkpoint;
+    let (diff, _) = engine.coedit_diff(&room.note_id, &room.mirror.sv())?;
     room.durable_dirty = false;
     if diff.is_empty() {
         return Ok(Vec::new());
     }
+    room.mirror.apply(&diff).map_err(SyncError::io)?;
     engine.push_updates(vec![DocUpdate {
         doc: room.doc_key(),
         u: diff,
@@ -383,11 +411,11 @@ where
                                 // in the crash-safe outbox), hand the local
                                 // doc state over, co-edit locally.
                                 let _ = engine.tick_scan_with_updates()?;
-                                let (state, checkpoint, _) =
-                                    engine.coedit_enter_state(&note_id)?;
+                                let (state, _, _) = engine.coedit_enter_state(&note_id)?;
                                 ctx.room = Some(RoomCtx {
                                     note_id: note_id.clone(),
-                                    checkpoint,
+                                    mirror: MirrorDoc::from_state(&state)
+                                        .map_err(SyncError::io)?,
                                     durable_dirty: false,
                                 });
                                 on_event(LiveEvent::RoomState { note_id, state });
@@ -432,9 +460,9 @@ async fn session<F>(
 where
     F: FnMut(LiveEvent),
 {
-    let ws = match tokio_tungstenite::connect_async(ws_url(&config.relay_url)).await {
-        Ok((ws, _)) => ws,
-        Err(e) => return Ok(SessionEnd::Network(e.to_string())),
+    let ws = match connect_ws(&config.relay_url).await {
+        Ok(ws) => ws,
+        Err(e) => return Ok(SessionEnd::Network(e.reason)),
     };
     let (mut sink, mut stream) = ws.split();
 
@@ -458,6 +486,11 @@ where
     // Presence is off until the Welcome advertises the capability (an old
     // relay never does — zero presence bytes leave this client then).
     let mut presence_on = false;
+    // Compaction: armed by the Welcome (cap + log size), fired at most once
+    // per session, right after catching up.
+    let mut compact_on = false;
+    let mut welcome_log_bytes = 0u64;
+    let mut compact_offered = false;
     let mut next_presence = Instant::now() + config.presence_interval;
     let mut presence_dirty = false;
     let mut presence_send_at = Instant::now();
@@ -531,6 +564,23 @@ where
                                         note_id: coedit.note_id,
                                         update: coedit.data,
                                     });
+                                    // Witness duty: if the author dies
+                                    // before its own durable debounce, WE
+                                    // checkpoint what we saw ephemerally.
+                                    // Longer deadline so the author usually
+                                    // wins — its echo empties our diff and
+                                    // the flush no-ops. Never DELAY an
+                                    // earlier armed deadline.
+                                    if let Some(room) = &mut ctx.room {
+                                        let witness_at = Instant::now()
+                                            + config.coedit_durable_debounce * 3;
+                                        durable_at = if room.durable_dirty {
+                                            durable_at.min(witness_at)
+                                        } else {
+                                            witness_at
+                                        };
+                                        room.durable_dirty = true;
+                                    }
                                 }
                             }
                             CoeditKind::Awareness => {
@@ -545,10 +595,17 @@ where
                     }
                     continue;
                 }
-                if let ServerMsg::Welcome { latest_seq, caps } = &msg {
+                if let ServerMsg::Welcome {
+                    latest_seq,
+                    caps,
+                    log_bytes,
+                } = &msg
+                {
                     *backoff = None;
                     target = Some(*latest_seq);
                     presence_on = caps.iter().any(|c| c == CAP_PRESENCE);
+                    compact_on = caps.iter().any(|c| c == CAP_COMPACT);
+                    welcome_log_bytes = *log_bytes;
                     on_event(LiveEvent::Connected {
                         latest_seq: *latest_seq,
                     });
@@ -575,10 +632,16 @@ where
                         });
                     }
                 }
+                if let ServerMsg::Compacted { upto_seq } = &msg {
+                    on_event(LiveEvent::Compacted { upto_seq: *upto_seq });
+                }
                 // Fold-before-apply: local disk state enters the CRDT before
                 // this update does, so concurrent edits merge instead of the
-                // stale snapshot erasing the remote edit later.
-                if matches!(msg, ServerMsg::Update { .. }) && last_scan.elapsed() >= config.fold_guard {
+                // stale snapshot erasing the remote edit later. A snapshot is
+                // just a big update — same hazard, same fold.
+                if matches!(msg, ServerMsg::Update { .. } | ServerMsg::Snapshot { .. })
+                    && last_scan.elapsed() >= config.fold_guard
+                {
                     if let Some(reason) =
                         fold_and_push(engine, &mut sink, ctx.room.as_mut(), on_event).await?
                     {
@@ -591,12 +654,15 @@ where
                     apply_deadline = Some(Instant::now() + config.apply_debounce);
                 }
                 // Durable updates for the room note (a peer's checkpoint
-                // push, a pass-based device's scan) reach the frontend doc
-                // too — idempotent for anything it already saw ephemerally.
-                if let Some(room) = &ctx.room {
+                // push, a pass-based device's scan, a snapshot) reach the
+                // frontend doc too — idempotent for anything it already saw
+                // ephemerally — and advance the durable mirror: our next
+                // flush must not re-log what the peer just checkpointed.
+                if let Some(room) = &mut ctx.room {
                     let key = room.doc_key();
                     for update in &effect.updates {
                         if update.doc == key {
+                            room.mirror.apply(&update.u).map_err(SyncError::io)?;
                             on_event(LiveEvent::CoeditUpdate {
                                 note_id: room.note_id.clone(),
                                 update: update.u.clone(),
@@ -612,6 +678,20 @@ where
                         if engine.pending_pushes().is_empty() && engine.last_seq() >= t {
                             caught_up = true;
                             on_event(LiveEvent::CaughtUp);
+                            // Caught up = our docs cover the whole log — the
+                            // moment a compaction snapshot is honest.
+                            if compact_on
+                                && !compact_offered
+                                && config.compact_threshold > 0
+                                && welcome_log_bytes > config.compact_threshold
+                                && engine.last_seq() > 0
+                            {
+                                compact_offered = true;
+                                let offer = [engine.snapshot_state()?];
+                                if let Some(reason) = send_all(&mut sink, &offer).await? {
+                                    return Ok(SessionEnd::Network(reason));
+                                }
+                            }
                         }
                     }
                 }
@@ -669,7 +749,7 @@ where
                                         return Ok(SessionEnd::Network(reason));
                                     }
                                     last_scan = Instant::now();
-                                    let (state, checkpoint, bootstrap) =
+                                    let (state, _, bootstrap) =
                                         engine.coedit_enter_state(&note_id)?;
                                     if let Some(reason) =
                                         send_all(&mut sink, &bootstrap).await?
@@ -678,7 +758,8 @@ where
                                     }
                                     ctx.room = Some(RoomCtx {
                                         note_id: note_id.clone(),
-                                        checkpoint,
+                                        mirror: MirrorDoc::from_state(&state)
+                                            .map_err(SyncError::io)?,
                                         durable_dirty: false,
                                     });
                                     on_event(LiveEvent::RoomState { note_id, state });

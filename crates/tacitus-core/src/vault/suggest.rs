@@ -189,13 +189,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn vault(notes: &[(&str, &str)]) -> (PathBuf, VaultIndex) {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = crate::test_unique_suffix();
         let mut dir = std::env::temp_dir();
         dir.push(format!("tacitus-sugg-{nanos}"));
         fs::create_dir_all(&dir).unwrap();

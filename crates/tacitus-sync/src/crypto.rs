@@ -147,6 +147,12 @@ pub struct SyncPayload {
     pub v: u32,
     pub device: String,
     pub updates: Vec<DocUpdate>,
+    /// Present ONLY in compaction snapshots: the log seq this full-state
+    /// payload covers. Lives inside the ciphertext so a hostile relay
+    /// cannot forge coverage and skip a client's cursor past entries it
+    /// never saw — the cleartext `upto_seq` on the wire is advisory only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_upto: Option<u64>,
 }
 
 /// Encrypt a payload: `nonce(24) || ciphertext`. `aad` binds the blob to
@@ -228,7 +234,28 @@ mod tests {
                 doc: "n:projects/launch".into(),
                 u: vec![1, 2, 3, 4],
             }],
+            snapshot_upto: None,
         }
+    }
+
+    #[test]
+    fn snapshot_upto_is_absent_from_ordinary_payloads_and_roundtrips() {
+        // Ordinary payloads must serialize byte-identically to 0.21 (no new
+        // field on the wire) — snapshot_upto appears only when set.
+        let plain = serde_json::to_string(&payload()).unwrap();
+        assert!(!plain.contains("snapshot_upto"));
+
+        let snap = SyncPayload {
+            snapshot_upto: Some(42),
+            ..payload()
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"snapshot_upto\":42"));
+        let back: SyncPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.snapshot_upto, Some(42));
+        // And a 0.21 payload (no field) parses with None.
+        let old: SyncPayload = serde_json::from_str(&plain).unwrap();
+        assert_eq!(old.snapshot_upto, None);
     }
 
     #[test]

@@ -128,10 +128,7 @@ mod tests {
     fn temp_vault() -> PathBuf {
         let mut dir = env::temp_dir();
         // Unique-ish per test via a nanosecond timestamp.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = crate::test_unique_suffix();
         dir.push(format!("tacitus-store-{nanos}"));
         dir
     }
