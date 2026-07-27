@@ -129,9 +129,15 @@ value — a hostile relay can't pin a forged `upto_seq` onto some other blob
 to leapfrog a client past entries it never delivered. (A hostile relay can
 still *withhold* data; that's inherent to relays and unchanged.)
 
-Limits: snapshots over 32 MB are refused (`snapshot_too_large`) — such
-vaults simply don't compact yet (chunked snapshots are future work) and
-grow toward the 512 MB backstop cap.
+Limits: a snapshot that fits 32 MB travels as the single blob above,
+byte-identical to 0.22. Bigger vaults chunk (0.23+): docs are packed into
+separately-encrypted **parts** (≤32 MB each, ≤512 MB total — a snapshot
+never outgrows the log it replaces). Each part's set membership
+(`snapshot_part {upto, idx, of}`) travels inside its ciphertext, and a
+client advances its cursor ONLY after applying a complete consistent set —
+a relay withholding or splicing parts can stall a client, never skip it
+past content. The one remaining ceiling is a single note whose sealed
+CRDT state exceeds 32 MB (see Caveats).
 
 ## Protocol (for relay implementers)
 
@@ -162,6 +168,23 @@ honest fatal error instead of a silent gap (0.21 and older clients below a
 compaction must upgrade; at or past it they work untouched). WS frame
 limits are raised to 64 MiB on both ends to fit snapshots.
 
+The third extension is `compact2` (0.23+), a strict superset of `compact`
+for chunked snapshots: the client uploads `compact_part {upto_seq, idx,
+of, blob}` in order 0..of-1 on one connection; the relay stages parts on
+disk, commits atomically on the last one, and replies `compacted` or a
+structured refusal (`compact_part_order`, `compact_part_too_large`,
+`compact_too_large`, plus the stale/ahead pair). A disconnect mid-upload
+discards the staging. Multi-part snapshots are served as `snapshot_part
+{upto_seq, idx, of, blob}` sequences, and ONLY to compact2 connections —
+single-part snapshots keep the legacy `snapshot` frame for every
+compact-capable client, so serving below 32 MB is unchanged. A
+compact-only client below a multi-part snapshot gets `err {code:
+"compacted"}`, exactly like a capless 0.21 client below any snapshot.
+Refusals of a compaction offer are advisory on both paths: the log is
+untouched, the connection survives, and a live session shrugs them off
+(losing the compaction race to another device is that device doing the
+job).
+
 ## Caveats
 
 - Don't point sync at a vault that's also inside Dropbox/iCloud sync —
@@ -169,5 +192,11 @@ limits are raised to 64 MiB on both ends to fit snapshots.
 - One sync process per vault per device: don't run `sync run` (live or not)
   against a vault the desktop app is already live-syncing — two engines
   race on the same `.tacitus/sync/` state.
-- Vaults whose full state exceeds 32 MB can't compact yet; their relay log
-  keeps growing toward the 512 MB cap.
+- A single note whose sealed CRDT state exceeds 32 MB can't ride a
+  snapshot (a doc never splits across parts) — such a vault doesn't
+  compact and grows toward the 512 MB cap. Whole-vault size stopped
+  mattering in 0.23: bigger states just chunk.
+- Don't downgrade a relay below 0.23 while a chunked snapshot is stored:
+  a 0.22 relay can't read the v2 `snapshot.json` and would serve the
+  truncated log as if nothing were missing. Single-part snapshots keep
+  the 0.22 file format, so vaults under 32 MB are downgrade-safe.
