@@ -20,12 +20,12 @@ use tacitus_core::vault::NoteWriter;
 use yrs::StateVector;
 
 use crate::apply::ApplyReport;
-use crate::client::{ensure_crypto_provider, ws_url};
+use crate::client::{connect_ws, ensure_crypto_provider};
 use crate::coedit::CoeditKind;
 use crate::crypto::DocUpdate;
 use crate::engine::SyncEngine;
 use crate::presence::{Peer, PeerTracker, PresenceState};
-use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_PRESENCE};
+use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
 use crate::SyncError;
 
 /// The relay drops ephemeral frames whose base64 exceeds 8 KiB — anything
@@ -71,6 +71,9 @@ pub struct LiveConfig {
     /// keystrokes travel ephemerally, then land in the relay log in one
     /// batched diff after this much quiet.
     pub coedit_durable_debounce: Duration,
+    /// When the Welcome reports a relay log bigger than this, a caught-up
+    /// session offers a compaction snapshot (once per session). 0 disables.
+    pub compact_threshold: u64,
 }
 
 impl LiveConfig {
@@ -88,6 +91,7 @@ impl LiveConfig {
             presence_ttl: Duration::from_secs(45),
             presence_debounce: Duration::from_millis(300),
             coedit_durable_debounce: Duration::from_secs(2),
+            compact_threshold: 4 * 1024 * 1024,
         }
     }
 }
@@ -150,6 +154,10 @@ pub enum LiveEvent {
     CoeditAwareness {
         note_id: String,
         data: Vec<u8>,
+    },
+    /// The relay accepted our compaction snapshot and truncated its log.
+    Compacted {
+        upto_seq: u64,
     },
 }
 
@@ -432,9 +440,9 @@ async fn session<F>(
 where
     F: FnMut(LiveEvent),
 {
-    let ws = match tokio_tungstenite::connect_async(ws_url(&config.relay_url)).await {
-        Ok((ws, _)) => ws,
-        Err(e) => return Ok(SessionEnd::Network(e.to_string())),
+    let ws = match connect_ws(&config.relay_url).await {
+        Ok(ws) => ws,
+        Err(e) => return Ok(SessionEnd::Network(e.reason)),
     };
     let (mut sink, mut stream) = ws.split();
 
@@ -458,6 +466,11 @@ where
     // Presence is off until the Welcome advertises the capability (an old
     // relay never does — zero presence bytes leave this client then).
     let mut presence_on = false;
+    // Compaction: armed by the Welcome (cap + log size), fired at most once
+    // per session, right after catching up.
+    let mut compact_on = false;
+    let mut welcome_log_bytes = 0u64;
+    let mut compact_offered = false;
     let mut next_presence = Instant::now() + config.presence_interval;
     let mut presence_dirty = false;
     let mut presence_send_at = Instant::now();
@@ -548,12 +561,14 @@ where
                 if let ServerMsg::Welcome {
                     latest_seq,
                     caps,
-                    log_bytes: _,
+                    log_bytes,
                 } = &msg
                 {
                     *backoff = None;
                     target = Some(*latest_seq);
                     presence_on = caps.iter().any(|c| c == CAP_PRESENCE);
+                    compact_on = caps.iter().any(|c| c == CAP_COMPACT);
+                    welcome_log_bytes = *log_bytes;
                     on_event(LiveEvent::Connected {
                         latest_seq: *latest_seq,
                     });
@@ -580,10 +595,16 @@ where
                         });
                     }
                 }
+                if let ServerMsg::Compacted { upto_seq } = &msg {
+                    on_event(LiveEvent::Compacted { upto_seq: *upto_seq });
+                }
                 // Fold-before-apply: local disk state enters the CRDT before
                 // this update does, so concurrent edits merge instead of the
-                // stale snapshot erasing the remote edit later.
-                if matches!(msg, ServerMsg::Update { .. }) && last_scan.elapsed() >= config.fold_guard {
+                // stale snapshot erasing the remote edit later. A snapshot is
+                // just a big update — same hazard, same fold.
+                if matches!(msg, ServerMsg::Update { .. } | ServerMsg::Snapshot { .. })
+                    && last_scan.elapsed() >= config.fold_guard
+                {
                     if let Some(reason) =
                         fold_and_push(engine, &mut sink, ctx.room.as_mut(), on_event).await?
                     {
@@ -617,6 +638,20 @@ where
                         if engine.pending_pushes().is_empty() && engine.last_seq() >= t {
                             caught_up = true;
                             on_event(LiveEvent::CaughtUp);
+                            // Caught up = our docs cover the whole log — the
+                            // moment a compaction snapshot is honest.
+                            if compact_on
+                                && !compact_offered
+                                && config.compact_threshold > 0
+                                && welcome_log_bytes > config.compact_threshold
+                                && engine.last_seq() > 0
+                            {
+                                compact_offered = true;
+                                let offer = [engine.snapshot_state()?];
+                                if let Some(reason) = send_all(&mut sink, &offer).await? {
+                                    return Ok(SessionEnd::Network(reason));
+                                }
+                            }
                         }
                     }
                 }

@@ -10,7 +10,7 @@ use tacitus_core::vault::NoteWriter;
 
 use crate::apply::ApplyReport;
 use crate::engine::SyncEngine;
-use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg};
+use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT};
 use crate::SyncError;
 
 /// How long we wait for the relay to say something before deciding the
@@ -49,13 +49,30 @@ pub(crate) fn ensure_crypto_provider() {
     });
 }
 
+/// Connect with WS limits matching the relay's: compaction snapshots can
+/// exceed tungstenite's 16 MiB default frame cap (outgoing messages are
+/// never fragmented), so both directions allow 64 MiB.
+pub(crate) async fn connect_ws(
+    relay_url: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    SyncError,
+> {
+    ensure_crypto_provider();
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(64 * 1024 * 1024))
+        .max_frame_size(Some(64 * 1024 * 1024));
+    let (ws, _) =
+        tokio_tungstenite::connect_async_with_config(ws_url(relay_url), Some(config), false)
+            .await
+            .map_err(net_err)?;
+    Ok(ws)
+}
+
 /// One full sync pass: connect, push local changes, drain the backlog,
 /// return once the outbox is empty and the cursor caught up to the log.
 pub async fn run_once(engine: &mut SyncEngine, relay_url: &str) -> Result<RunReport, SyncError> {
-    ensure_crypto_provider();
-    let (ws, _) = tokio_tungstenite::connect_async(ws_url(relay_url))
-        .await
-        .map_err(net_err)?;
+    let ws = connect_ws(relay_url).await?;
     let (mut sink, mut stream) = ws.split();
 
     let mut report = RunReport::default();
@@ -122,6 +139,91 @@ pub async fn run_once(engine: &mut SyncEngine, relay_url: &str) -> Result<RunRep
 
     let _ = sink.send(Message::Close(None)).await;
     Ok(report)
+}
+
+/// Force one compaction pass: connect, catch up (so the snapshot honestly
+/// covers the whole log), offer the snapshot, await the relay's confirm.
+/// Returns the covered seq — or 0 when the log is already empty.
+pub async fn run_compact(engine: &mut SyncEngine, relay_url: &str) -> Result<u64, SyncError> {
+    let ws = connect_ws(relay_url).await?;
+    let (mut sink, mut stream) = ws.split();
+    let encode = |msg: &ClientMsg| serde_json::to_string(msg).map_err(net_err);
+
+    let hello = encode(&engine.hello())?;
+    engine.tick_scan()?; // fold local changes so the snapshot is complete
+    sink.send(Message::Text(hello.into()))
+        .await
+        .map_err(net_err)?;
+
+    let mut target: Option<u64> = None;
+    let mut relay_compacts = false;
+    let mut offered = false;
+    loop {
+        if let Some(t) = target {
+            if !offered && engine.pending_pushes().is_empty() && engine.last_seq() >= t {
+                if engine.last_seq() == 0 {
+                    let _ = sink.send(Message::Close(None)).await;
+                    return Ok(0); // empty log — nothing to compact
+                }
+                if !relay_compacts {
+                    return Err(SyncError {
+                        code: "UNSUPPORTED",
+                        reason: "relay does not advertise compaction — upgrade the relay".into(),
+                    });
+                }
+                offered = true;
+                let offer = encode(&engine.snapshot_state()?)?;
+                sink.send(Message::Text(offer.into()))
+                    .await
+                    .map_err(net_err)?;
+            }
+        }
+        let frame = tokio::time::timeout(QUIET_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| SyncError {
+                code: "NETWORK",
+                reason: "relay went quiet mid-compact".into(),
+            })?
+            .ok_or_else(|| SyncError {
+                code: "NETWORK",
+                reason: "relay closed the connection mid-compact".into(),
+            })?
+            .map_err(net_err)?;
+        let text = match frame {
+            Message::Text(text) => text,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => {
+                return Err(SyncError {
+                    code: "NETWORK",
+                    reason: "relay closed the connection mid-compact".into(),
+                })
+            }
+            _ => continue,
+        };
+        let msg: ServerMsg = match parse_server_msg(&text) {
+            Ok(Some(msg)) => msg,
+            Ok(None) => continue,
+            Err(e) => return Err(net_err(e)),
+        };
+        if let ServerMsg::Welcome {
+            latest_seq, caps, ..
+        } = &msg
+        {
+            target = Some(*latest_seq);
+            relay_compacts = caps.iter().any(|c| c == CAP_COMPACT);
+        }
+        if let ServerMsg::Compacted { upto_seq } = &msg {
+            let upto = *upto_seq;
+            let _ = sink.send(Message::Close(None)).await;
+            return Ok(upto);
+        }
+        let effect = engine.on_server_msg(msg)?;
+        for out in &effect.outbound {
+            sink.send(Message::Text(encode(out)?.into()))
+                .await
+                .map_err(net_err)?;
+        }
+    }
 }
 
 #[derive(Debug, Default)]

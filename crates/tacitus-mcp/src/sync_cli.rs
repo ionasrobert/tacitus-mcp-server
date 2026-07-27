@@ -1,9 +1,10 @@
 //! `tacitus-mcp sync …` — the CLI face of Tacitus Sync.
 //!
-//!   tacitus-mcp sync init   [--vault <path>] [--relay <url>] [--code <code>]
-//!   tacitus-mcp sync once   [--vault <path>]
-//!   tacitus-mcp sync run    [--vault <path>] [--interval <secs>] [--live]
-//!   tacitus-mcp sync status [--vault <path>]
+//!   tacitus-mcp sync init    [--vault <path>] [--relay <url>] [--code <code>]
+//!   tacitus-mcp sync once    [--vault <path>]
+//!   tacitus-mcp sync run     [--vault <path>] [--interval <secs>] [--live]
+//!   tacitus-mcp sync status  [--vault <path>]
+//!   tacitus-mcp sync compact [--vault <path>]
 //!
 //! `run --live` holds one persistent relay connection: remote edits land
 //! within ~a second, local edits are picked up by the scan tick
@@ -39,6 +40,9 @@ pub enum SyncCmd {
         live: bool,
     },
     Status {
+        vault: PathBuf,
+    },
+    Compact {
         vault: PathBuf,
     },
 }
@@ -92,8 +96,9 @@ pub fn parse_sync_args(args: &[String]) -> Result<SyncCmd, String> {
             live,
         }),
         "status" => Ok(SyncCmd::Status { vault }),
+        "compact" => Ok(SyncCmd::Compact { vault }),
         other => Err(format!(
-            "unknown sync subcommand {other:?} — use init | once | run | status"
+            "unknown sync subcommand {other:?} — use init | once | run | status | compact"
         )),
     }
 }
@@ -244,6 +249,9 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
                         LiveEvent::RoomState { .. }
                         | LiveEvent::CoeditUpdate { .. }
                         | LiveEvent::CoeditAwareness { .. } => {}
+                        LiveEvent::Compacted { upto_seq } => {
+                            eprintln!("compacted relay log up to seq {upto_seq}");
+                        }
                         LiveEvent::Peers(peers) => {
                             if peers.is_empty() {
                                 eprintln!("no other devices online");
@@ -288,6 +296,26 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
             )
             .await
             .map_err(|e| e.to_string())
+        }
+        SyncCmd::Compact { vault } => {
+            let config = load_config(&vault)?;
+            let code = VaultCode::parse(&config.vault_code).map_err(|e| e.to_string())?;
+            let mut engine = SyncEngine::open(&vault, &code).map_err(|e| e.to_string())?;
+            let upto = client::run_compact(&mut engine, &config.relay_url)
+                .await
+                .map_err(|e| e.to_string())?;
+            // Materialize whatever the catch-up pulled in on the way.
+            let mut writer = sync_writer(&vault);
+            let dirty = engine.pending_apply();
+            engine
+                .apply_dirty(&mut writer, &dirty)
+                .map_err(|e| e.to_string())?;
+            if upto == 0 {
+                eprintln!("nothing to compact — the relay log is empty");
+            } else {
+                eprintln!("compacted: relay log truncated up to seq {upto}");
+            }
+            Ok(())
         }
         SyncCmd::Status { vault } => {
             let config = load_config(&vault)?;
@@ -351,6 +379,12 @@ mod tests {
             parse_sync_args(&s(&["once"])).unwrap(),
             SyncCmd::Once {
                 vault: PathBuf::from("."),
+            }
+        );
+        assert_eq!(
+            parse_sync_args(&s(&["compact", "--vault", "/tmp/v"])).unwrap(),
+            SyncCmd::Compact {
+                vault: PathBuf::from("/tmp/v"),
             }
         );
         assert!(parse_sync_args(&s(&["frobnicate"])).is_err());
