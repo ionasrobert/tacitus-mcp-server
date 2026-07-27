@@ -154,9 +154,8 @@ impl VaultLog {
         }
 
         let snapshot = match fs::read_to_string(dir.join("snapshot.json")) {
-            Ok(raw) => serde_json::from_str::<SnapFile>(&raw)
-                .ok()
-                .and_then(|s| match (s.blob, s.parts) {
+            Ok(raw) => serde_json::from_str::<SnapFile>(&raw).ok().and_then(|s| {
+                match (s.blob, s.parts) {
                     (Some(b64), _) => B64.decode(&b64).ok().map(|blob| SnapshotState {
                         seq: s.seq,
                         store: SnapshotStore::Inline(blob),
@@ -175,7 +174,8 @@ impl VaultLog {
                             })
                     }
                     (None, None) => None,
-                }),
+                }
+            }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
@@ -360,7 +360,9 @@ impl VaultLog {
         }
         self.check_compactable(staging.upto_seq)?;
 
-        let parts_dir = self.dir.join(format!("snapshot.parts.{}", staging.upto_seq));
+        let parts_dir = self
+            .dir
+            .join(format!("snapshot.parts.{}", staging.upto_seq));
         if parts_dir.exists() {
             fs::remove_dir_all(&parts_dir)?;
         }
@@ -755,19 +757,45 @@ mod tests {
         commit_chunked(&mut log, 3, &[b"p0", b"p1"]).unwrap();
 
         // Stale/ahead refusals fail fast at staging time.
-        assert!(log.stage_parts(3, 2).unwrap_err().to_string().contains("compact_stale"));
-        assert!(log.stage_parts(99, 2).unwrap_err().to_string().contains("compact_ahead"));
-        assert!(log.stage_parts(4, 0).unwrap_err().to_string().contains("compact_part_order"));
+        assert!(log
+            .stage_parts(3, 2)
+            .unwrap_err()
+            .to_string()
+            .contains("compact_stale"));
+        assert!(log
+            .stage_parts(99, 2)
+            .unwrap_err()
+            .to_string()
+            .contains("compact_ahead"));
+        assert!(log
+            .stage_parts(4, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("compact_part_order"));
         // Extra parts beyond the declared count are an ordering violation.
         let mut staging = log.stage_parts(4, 1).unwrap();
         staging.add(b"only").unwrap();
-        assert!(staging.add(b"extra").unwrap_err().to_string().contains("compact_part_order"));
+        assert!(staging
+            .add(b"extra")
+            .unwrap_err()
+            .to_string()
+            .contains("compact_part_order"));
         // Committing an incomplete set is one too.
         let staging = log.stage_parts(4, 2).unwrap();
-        assert!(log.commit_parts(staging).unwrap_err().to_string().contains("compact_part_order"));
+        assert!(log
+            .commit_parts(staging)
+            .unwrap_err()
+            .to_string()
+            .contains("compact_part_order"));
         // The caps are pure checks — the 512 MiB total needs no fixture.
-        assert_eq!(part_cap_violation(0, SNAPSHOT_MAX + 1), Some("compact_part_too_large"));
-        assert_eq!(part_cap_violation(SNAPSHOT_TOTAL_MAX - 10, 11), Some("compact_too_large"));
+        assert_eq!(
+            part_cap_violation(0, SNAPSHOT_MAX + 1),
+            Some("compact_part_too_large")
+        );
+        assert_eq!(
+            part_cap_violation(SNAPSHOT_TOTAL_MAX - 10, 11),
+            Some("compact_too_large")
+        );
         assert_eq!(part_cap_violation(SNAPSHOT_TOTAL_MAX - 10, 10), None);
         // The valid snapshot is untouched by every rejection.
         assert_eq!(log.snapshot_seq(), Some(3));
@@ -836,15 +864,20 @@ mod tests {
             let staged: Vec<_> = fs::read_dir(&vdir)
                 .unwrap()
                 .flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with("snapshot.staging."))
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("snapshot.staging.")
+                })
                 .collect();
             assert_eq!(staged.len(), 1);
             // Dropped without commit — disconnect mid-upload.
         }
-        let staged = fs::read_dir(&vdir)
-            .unwrap()
-            .flatten()
-            .any(|e| e.file_name().to_string_lossy().starts_with("snapshot.staging."));
+        let staged = fs::read_dir(&vdir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("snapshot.staging.")
+        });
         assert!(!staged, "dropping the staging removes its dir");
 
         // A v2 snapshot.json whose parts dir is gone (manual tampering)

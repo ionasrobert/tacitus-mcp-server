@@ -261,7 +261,9 @@ mod tests {
         // errors — not tolerant "future tag" skips.
         assert!(parse_server_msg(r#"{"t":"snapshot","upto_seq":"NaN","blob":""}"#).is_err());
         assert!(parse_server_msg(r#"{"t":"compacted"}"#).is_err());
-        assert!(parse_server_msg(r#"{"t":"snapshot_part","upto_seq":1,"idx":0,"blob":""}"#).is_err());
+        assert!(
+            parse_server_msg(r#"{"t":"snapshot_part","upto_seq":1,"idx":0,"blob":""}"#).is_err()
+        );
         assert!(matches!(
             parse_server_msg(r#"{"t":"compacted","upto_seq":4}"#),
             Ok(Some(ServerMsg::Compacted { upto_seq: 4 }))
