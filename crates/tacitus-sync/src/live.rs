@@ -545,7 +545,12 @@ where
                     }
                     continue;
                 }
-                if let ServerMsg::Welcome { latest_seq, caps } = &msg {
+                if let ServerMsg::Welcome {
+                    latest_seq,
+                    caps,
+                    log_bytes: _,
+                } = &msg
+                {
                     *backoff = None;
                     target = Some(*latest_seq);
                     presence_on = caps.iter().any(|c| c == CAP_PRESENCE);

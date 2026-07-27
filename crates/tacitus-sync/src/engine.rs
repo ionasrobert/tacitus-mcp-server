@@ -18,7 +18,7 @@ use crate::crypto::{self, DocUpdate, Keys, SyncPayload, VaultCode};
 use crate::docs::DocStore;
 use crate::outbox::Outbox;
 use crate::presence::{presence_aad, PresencePayload, PresenceState};
-use crate::protocol::{ClientMsg, ServerMsg, CAP_PRESENCE};
+use crate::protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
 use crate::scan::scan;
 use crate::state::ShadowState;
 use crate::SyncError;
@@ -181,7 +181,7 @@ impl SyncEngine {
             vault_id: self.keys.vault_id.clone(),
             token: self.keys.auth_token.clone(),
             since_seq: self.last_seq,
-            caps: vec![CAP_PRESENCE.to_string()],
+            caps: vec![CAP_PRESENCE.to_string(), CAP_COMPACT.to_string()],
         }
     }
 
@@ -273,10 +273,43 @@ impl SyncEngine {
             v: 1,
             device: self.device_id.clone(),
             updates,
+            snapshot_upto: None,
         };
         let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
         self.outbox.push(blob.clone()).map_err(SyncError::io)?;
         Ok(vec![ClientMsg::Push { blob }])
+    }
+
+    /// Everything this device knows as one sealed full-state snapshot
+    /// covering the log up to our cursor — the compaction offer. The relay
+    /// truncates beneath `upto_seq` and serves this blob to anyone below it.
+    /// Only meaningful when caught up; the covered seq also travels INSIDE
+    /// the ciphertext (`snapshot_upto`) so the relay can't forge coverage.
+    pub fn snapshot_state(&mut self) -> Result<ClientMsg, SyncError> {
+        let upto = self.last_seq;
+        let mut updates = Vec::new();
+        for key in self.docs.known_items().map_err(SyncError::io)? {
+            if let Some(state) = self.docs.full_state_of(&key).map_err(SyncError::io)? {
+                updates.push(DocUpdate { doc: key, u: state });
+            }
+        }
+        // Tombstones ride along — deletes must survive compaction, or a
+        // fresh device would resurrect every deleted note.
+        updates.push(DocUpdate {
+            doc: crate::docs::MANIFEST_KEY.to_string(),
+            u: self.docs.manifest_state(),
+        });
+        let payload = SyncPayload {
+            v: 1,
+            device: self.device_id.clone(),
+            updates,
+            snapshot_upto: Some(upto),
+        };
+        let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
+        Ok(ClientMsg::Compact {
+            upto_seq: upto,
+            blob,
+        })
     }
 
     /// Prepare a co-editing room for a note. Returns the doc's full state
@@ -410,6 +443,7 @@ impl SyncEngine {
             v: 1,
             device: self.device_id.clone(),
             updates: updates.clone(),
+            snapshot_upto: None,
         };
         let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
         self.outbox.push(blob.clone()).map_err(SyncError::io)?;
@@ -454,6 +488,41 @@ impl SyncEngine {
                 }
                 self.last_seq = seq;
                 self.persist_cursor()?;
+            }
+            ServerMsg::Snapshot { upto_seq: _, blob } => {
+                // The compacted log prefix as one full-state payload. Trust
+                // only the covered seq INSIDE the ciphertext — the cleartext
+                // upto_seq is the relay's claim, and a hostile relay could
+                // pin it to any blob to leapfrog our cursor past entries we
+                // never saw.
+                let payload: SyncPayload =
+                    crypto::open(&self.keys.vault_key, &self.keys.vault_id, &blob)?;
+                let Some(upto) = payload.snapshot_upto else {
+                    return Ok(effect); // not a snapshot — never jump the cursor
+                };
+                if upto <= self.last_seq {
+                    return Ok(effect); // already covered
+                }
+                // Full states are idempotent merges — applying our own
+                // snapshot back is harmless, so no device_id skip here.
+                for update in &payload.updates {
+                    self.docs
+                        .apply_remote(&update.doc, &update.u)
+                        .map_err(SyncError::io)?;
+                    effect.dirty_items.push(update.doc.clone());
+                }
+                effect.updates = payload.updates;
+                // Same crash-safe order as Update: queue before cursor.
+                if !effect.dirty_items.is_empty() {
+                    self.pending_apply
+                        .extend(effect.dirty_items.iter().cloned());
+                    self.persist_pending_apply()?;
+                }
+                self.last_seq = upto;
+                self.persist_cursor()?;
+            }
+            ServerMsg::Compacted { .. } => {
+                // Our compact offer was accepted — informational only.
             }
             ServerMsg::Err { code, msg } => {
                 return Err(SyncError {
@@ -969,11 +1038,157 @@ mod tests {
             .on_server_msg(ServerMsg::Welcome {
                 latest_seq: 0,
                 caps: vec![],
+                log_bytes: 0,
             })
             .unwrap();
         assert_eq!(effect.outbound.len(), 1);
         engine.on_server_msg(ServerMsg::Ack { seq: 1 }).unwrap();
         assert!(engine.pending_pushes().is_empty());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hello_advertises_compact_capability() {
+        let dir = temp_vault("hello-compact");
+        let engine = SyncEngine::open(&dir, &VaultCode::generate()).unwrap();
+        let ClientMsg::Hello { caps, .. } = engine.hello() else {
+            panic!("hello is hello");
+        };
+        assert!(caps.iter().any(|c| c == CAP_COMPACT));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_state_seals_all_docs_and_manifest() {
+        let da = temp_vault("snapstate-a");
+        let db = temp_vault("snapstate-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        // A creates two notes, then deletes one — several log entries.
+        fs::write(da.join("keep.md"), "keep me\n").unwrap();
+        fs::write(da.join("gone.md"), "delete me\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        fs::remove_file(da.join("gone.md")).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        assert_eq!(a.last_seq(), relay.log.len() as u64, "A is caught up");
+
+        // The snapshot alone (no log!) reconstructs a fresh device —
+        // including the delete, which must survive compaction.
+        let ClientMsg::Compact { upto_seq, blob } = a.snapshot_state().unwrap() else {
+            panic!("expected a compact offer");
+        };
+        assert_eq!(upto_seq, a.last_seq());
+
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        b.on_server_msg(ServerMsg::Snapshot { upto_seq, blob })
+            .unwrap();
+        assert_eq!(
+            b.materialize("n:keep").unwrap().as_deref(),
+            Some("keep me\n")
+        );
+        assert_eq!(
+            b.materialize("n:gone").unwrap(),
+            None,
+            "tombstone rides the snapshot"
+        );
+        assert_eq!(b.last_seq(), upto_seq, "cursor jumps to the covered seq");
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn snapshot_apply_is_crash_safe_and_advances_cursor_from_inner_seq() {
+        let da = temp_vault("snapcrash-a");
+        let db = temp_vault("snapcrash-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        fs::write(da.join("note.md"), "content\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        let ClientMsg::Compact { upto_seq, blob } = a.snapshot_state().unwrap() else {
+            panic!("expected a compact offer");
+        };
+
+        {
+            let mut b = SyncEngine::open(&db, &code).unwrap();
+            b.on_server_msg(ServerMsg::Snapshot { upto_seq, blob })
+                .unwrap();
+            // Crash before the apply pass runs.
+        }
+        let reopened = SyncEngine::open(&db, &code).unwrap();
+        assert!(
+            reopened.pending_apply().contains(&"n:note".to_string()),
+            "queued items survive the crash (persisted BEFORE the cursor)"
+        );
+        assert_eq!(reopened.last_seq(), upto_seq);
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn snapshot_with_forged_outer_seq_does_not_advance_cursor() {
+        let da = temp_vault("snapforge-a");
+        let db = temp_vault("snapforge-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        fs::write(da.join("x.md"), "x\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+
+        // A hostile relay pins an arbitrary upto_seq to an ORDINARY push
+        // blob (no snapshot_upto inside the ciphertext). The client must
+        // refuse the cursor jump — otherwise the relay could leapfrog it
+        // past entries it never delivered.
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        let effect = b
+            .on_server_msg(ServerMsg::Snapshot {
+                upto_seq: 999,
+                blob: relay.log[0].clone(),
+            })
+            .unwrap();
+        assert_eq!(b.last_seq(), 0, "forged coverage is ignored");
+        assert!(effect.dirty_items.is_empty());
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn snapshot_already_covered_is_skipped() {
+        let da = temp_vault("snapskip-a");
+        let db = temp_vault("snapskip-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        fs::write(da.join("x.md"), "x\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        let ClientMsg::Compact { upto_seq, blob } = a.snapshot_state().unwrap() else {
+            panic!("expected a compact offer");
+        };
+
+        // B already replayed the whole log — the snapshot is old news.
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        drain(&mut b, &relay);
+        let before = b.last_seq();
+        let effect = b
+            .on_server_msg(ServerMsg::Snapshot { upto_seq, blob })
+            .unwrap();
+        assert_eq!(b.last_seq(), before, "cursor never moves backwards");
+        assert!(effect.dirty_items.is_empty(), "nothing re-queued");
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
     }
 }

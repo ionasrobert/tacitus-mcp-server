@@ -270,6 +270,14 @@ impl DocStore {
         Ok(Some(text.get_string(&txn)))
     }
 
+    /// Full compacted state of the tombstone manifest. Its own accessor:
+    /// routing "manifest" through `load()` would cache a SECOND manifest doc
+    /// under the item key (encode_key("manifest") == the manifest's file),
+    /// silently divergent from `self.manifest`.
+    pub fn manifest_state(&self) -> Vec<u8> {
+        full_state(&self.manifest)
+    }
+
     /// Every item this store has a doc for (from disk — survives restarts).
     pub fn known_items(&self) -> io::Result<Vec<String>> {
         let mut items = Vec::new();

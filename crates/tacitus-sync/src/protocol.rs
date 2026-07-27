@@ -25,6 +25,14 @@ pub(crate) mod b64 {
 /// for old peers, so anything beyond the 0.19 set must be caps-negotiated.
 pub const CAP_PRESENCE: &str = "presence";
 
+/// Capability for log compaction: a caught-up client may push a sealed
+/// full-state snapshot (`compact`); the relay truncates the log beneath it
+/// and serves the snapshot as the first backlog frame (`snapshot`) to any
+/// capable client whose cursor is below it. Clients WITHOUT this cap that
+/// hello below the snapshot get `err {code:"compacted"}` — an honest fatal
+/// error instead of silent divergence.
+pub const CAP_COMPACT: &str = "compact";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -46,6 +54,16 @@ pub enum ClientMsg {
         #[serde(with = "b64")]
         blob: Vec<u8>,
     },
+    /// Compaction offer: `blob` is a sealed full-state snapshot covering the
+    /// log up to `upto_seq` (the pusher's cursor). The relay truncates
+    /// entries `<= upto_seq` and keeps serving seqs unchanged. The covered
+    /// seq ALSO travels inside the ciphertext (`SyncPayload.snapshot_upto`)
+    /// so a hostile relay can't forge coverage claims.
+    Compact {
+        upto_seq: u64,
+        #[serde(with = "b64")]
+        blob: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +75,11 @@ pub enum ServerMsg {
         /// must not send extension frames the relay didn't advertise.
         #[serde(default)]
         caps: Vec<String>,
+        /// Current size of the vault's log on disk (absent pre-0.22 → 0).
+        /// The compaction trigger: a caught-up client compacts when this
+        /// crosses its threshold.
+        #[serde(default)]
+        log_bytes: u64,
     },
     Update {
         seq: u64,
@@ -74,11 +97,32 @@ pub enum ServerMsg {
         #[serde(with = "b64")]
         blob: Vec<u8>,
     },
+    /// The compacted prefix of the log as one sealed full-state blob. Served
+    /// before the tail to capable clients whose `since_seq` is below the
+    /// snapshot. The client trusts only the seq INSIDE the ciphertext, not
+    /// this cleartext `upto_seq` (the relay controls the latter).
+    Snapshot {
+        upto_seq: u64,
+        #[serde(with = "b64")]
+        blob: Vec<u8>,
+    },
+    /// Reply to a `compact` push: the log was truncated up to `upto_seq`.
+    Compacted {
+        upto_seq: u64,
+    },
 }
 
 // Used by the client drivers (feature "client"); tests exercise it always.
 #[cfg_attr(not(feature = "client"), allow(dead_code))]
-const KNOWN_SERVER_TAGS: [&str; 5] = ["welcome", "update", "ack", "err", "presence"];
+const KNOWN_SERVER_TAGS: [&str; 7] = [
+    "welcome",
+    "update",
+    "ack",
+    "err",
+    "presence",
+    "snapshot",
+    "compacted",
+];
 
 /// Tolerant frame parsing for the client drivers: `Ok(None)` = a well-formed
 /// frame with a tag from a FUTURE protocol version (skip it — don't kill the
@@ -119,12 +163,60 @@ mod tests {
         }
         let welcome: ServerMsg = serde_json::from_str(r#"{"t":"welcome","latest_seq":9}"#).unwrap();
         match welcome {
-            ServerMsg::Welcome { caps, latest_seq } => {
+            ServerMsg::Welcome {
+                caps,
+                latest_seq,
+                log_bytes,
+            } => {
                 assert!(caps.is_empty());
                 assert_eq!(latest_seq, 9);
+                // Pre-0.22 relays don't send log_bytes — 0 means "unknown",
+                // which never crosses a compaction threshold.
+                assert_eq!(log_bytes, 0);
             }
             other => panic!("expected welcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compact_and_snapshot_frames_roundtrip_json() {
+        let compact = ClientMsg::Compact {
+            upto_seq: 12,
+            blob: vec![1, 2, 255],
+        };
+        let json = serde_json::to_string(&compact).unwrap();
+        assert!(json.contains("\"t\":\"compact\""));
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, ClientMsg::Compact { upto_seq: 12, blob } if blob == vec![1, 2, 255])
+        );
+
+        let snapshot = ServerMsg::Snapshot {
+            upto_seq: 12,
+            blob: vec![9, 9],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("\"t\":\"snapshot\""));
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ServerMsg::Snapshot { upto_seq: 12, blob } if blob == vec![9, 9]));
+
+        let done = ServerMsg::Compacted { upto_seq: 12 };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains("\"t\":\"compacted\""));
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ServerMsg::Compacted { upto_seq: 12 }));
+    }
+
+    #[test]
+    fn snapshot_and_compacted_are_known_tags_with_strict_fields() {
+        // Now that these tags are known, malformed instances must be real
+        // errors — not tolerant "future tag" skips.
+        assert!(parse_server_msg(r#"{"t":"snapshot","upto_seq":"NaN","blob":""}"#).is_err());
+        assert!(parse_server_msg(r#"{"t":"compacted"}"#).is_err());
+        assert!(matches!(
+            parse_server_msg(r#"{"t":"compacted","upto_seq":4}"#),
+            Ok(Some(ServerMsg::Compacted { upto_seq: 4 }))
+        ));
     }
 
     #[test]
