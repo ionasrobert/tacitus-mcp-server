@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 use yrs::StateVector;
 
 use crate::coedit::{coedit_aad, CoeditKind, CoeditPayload};
-use crate::crypto::{self, DocUpdate, Keys, SyncPayload, VaultCode};
+use crate::crypto::{self, DocUpdate, Keys, SnapshotPart, SyncPayload, VaultCode};
 use crate::docs::DocStore;
 use crate::outbox::Outbox;
 use crate::presence::{presence_aad, PresencePayload, PresenceState};
-use crate::protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
+use crate::protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE};
 use crate::scan::scan;
 use crate::state::ShadowState;
 use crate::SyncError;
@@ -27,6 +27,21 @@ use crate::SyncError;
 struct Cursor {
     device_id: String,
     last_seq: u64,
+}
+
+/// Estimated serialized-payload budget per chunked-snapshot part. Counts
+/// the b64 inflation of each update, so a packed part seals to roughly the
+/// estimate — comfortably under the relay's 32 MiB per-part cap.
+pub const SNAPSHOT_PART_BUDGET: usize = 24 * 1024 * 1024;
+
+/// Which chunked-snapshot parts we've applied so far. Deliberately NOT
+/// persisted: a reconnect re-serves every part and full states re-apply
+/// idempotently, so a crash mid-set costs a re-download, never data.
+#[derive(Debug)]
+struct PartTracker {
+    upto: u64,
+    of: u32,
+    seen: BTreeSet<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +81,8 @@ pub struct SyncEngine {
     /// "coedit" in the audit log. Deliberately NOT persisted: attribution is
     /// cosmetic, and after a crash the recovered apply is honestly "sync".
     pending_coedit: BTreeSet<String>,
+    /// In-flight chunked snapshot download (see `PartTracker`).
+    snapshot_parts: Option<PartTracker>,
 }
 
 fn random_device_id() -> String {
@@ -119,6 +136,7 @@ impl SyncEngine {
             last_seq: cursor.last_seq,
             pending_apply,
             pending_coedit: BTreeSet::new(),
+            snapshot_parts: None,
         };
         engine.persist_cursor()?;
         Ok(engine)
@@ -195,7 +213,11 @@ impl SyncEngine {
             vault_id: self.keys.vault_id.clone(),
             token: self.keys.auth_token.clone(),
             since_seq: self.last_seq,
-            caps: vec![CAP_PRESENCE.to_string(), CAP_COMPACT.to_string()],
+            caps: vec![
+                CAP_PRESENCE.to_string(),
+                CAP_COMPACT.to_string(),
+                CAP_COMPACT2.to_string(),
+            ],
         }
     }
 
@@ -289,18 +311,25 @@ impl SyncEngine {
             device: self.device_id.clone(),
             updates,
             snapshot_upto: None,
+            snapshot_part: None,
         };
         let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
         self.outbox.push(blob.clone()).map_err(SyncError::io)?;
         Ok(vec![ClientMsg::Push { blob }])
     }
 
-    /// Everything this device knows as one sealed full-state snapshot
-    /// covering the log up to our cursor — the compaction offer. The relay
-    /// truncates beneath `upto_seq` and serves this blob to anyone below it.
-    /// Only meaningful when caught up; the covered seq also travels INSIDE
-    /// the ciphertext (`snapshot_upto`) so the relay can't forge coverage.
-    pub fn snapshot_state(&mut self) -> Result<ClientMsg, SyncError> {
+    /// Everything this device knows as a compaction offer covering the log
+    /// up to our cursor. Docs are greedy-packed by estimated sealed size
+    /// under `part_budget` (a doc never splits): one part that fits → the
+    /// legacy single-blob `compact`, byte-identical to the 0.22 offer;
+    /// anything bigger → an ordered series of separately-sealed
+    /// `compact_part` frames. Only meaningful when caught up; coverage
+    /// travels INSIDE the ciphertext (`snapshot_upto` on the single blob,
+    /// `snapshot_part` on each part) so the relay can't forge it.
+    pub fn snapshot_state_parts(
+        &mut self,
+        part_budget: usize,
+    ) -> Result<Vec<ClientMsg>, SyncError> {
         let upto = self.last_seq;
         let mut updates = Vec::new();
         for key in self.docs.known_items().map_err(SyncError::io)? {
@@ -314,17 +343,67 @@ impl SyncEngine {
             doc: crate::docs::MANIFEST_KEY.to_string(),
             u: self.docs.manifest_state(),
         });
-        let payload = SyncPayload {
-            v: 1,
-            device: self.device_id.clone(),
-            updates,
-            snapshot_upto: Some(upto),
-        };
-        let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
-        Ok(ClientMsg::Compact {
-            upto_seq: upto,
-            blob,
-        })
+
+        // Estimated serialized bytes per update: b64-inflated CRDT state +
+        // doc key + JSON syntax. Close enough — the budget leaves ~33%
+        // headroom under the relay's per-part cap.
+        let estimate = |u: &DocUpdate| u.u.len().div_ceil(3) * 4 + u.doc.len() + 24;
+        let mut parts: Vec<Vec<DocUpdate>> = vec![Vec::new()];
+        let mut part_bytes = 0usize;
+        for update in updates {
+            let cost = estimate(&update);
+            if part_bytes + cost > part_budget && !parts.last().expect("non-empty").is_empty() {
+                parts.push(Vec::new());
+                part_bytes = 0;
+            }
+            part_bytes += cost;
+            parts.last_mut().expect("non-empty").push(update);
+        }
+
+        // A single part under budget seals to well under the relay's legacy
+        // cap — send the 0.22 frame. (A lone over-budget doc still goes as a
+        // part: its refusal comes back as an advisory `compact_part_too_
+        // large` instead of the legacy session-level `snapshot_too_large`.)
+        if parts.len() == 1 && part_bytes <= part_budget {
+            let payload = SyncPayload {
+                v: 1,
+                device: self.device_id.clone(),
+                updates: parts.pop().expect("one part"),
+                snapshot_upto: Some(upto),
+                snapshot_part: None,
+            };
+            let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
+            return Ok(vec![ClientMsg::Compact {
+                upto_seq: upto,
+                blob,
+            }]);
+        }
+
+        let of = u32::try_from(parts.len()).map_err(|_| SyncError {
+            code: "INTERNAL",
+            reason: "snapshot part count overflow".into(),
+        })?;
+        let mut frames = Vec::with_capacity(parts.len());
+        for (idx, updates) in parts.into_iter().enumerate() {
+            let idx = idx as u32;
+            // snapshot_upto stays None on parts: a pre-0.23 client fed one
+            // skips it without applying or moving its cursor.
+            let payload = SyncPayload {
+                v: 1,
+                device: self.device_id.clone(),
+                updates,
+                snapshot_upto: None,
+                snapshot_part: Some(SnapshotPart { upto, idx, of }),
+            };
+            let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
+            frames.push(ClientMsg::CompactPart {
+                upto_seq: upto,
+                idx,
+                of,
+                blob,
+            });
+        }
+        Ok(frames)
     }
 
     /// Prepare a co-editing room for a note. Returns the doc's full state
@@ -459,6 +538,7 @@ impl SyncEngine {
             device: self.device_id.clone(),
             updates: updates.clone(),
             snapshot_upto: None,
+            snapshot_part: None,
         };
         let blob = crypto::seal(&self.keys.vault_key, &self.keys.vault_id, &payload)?;
         self.outbox.push(blob.clone()).map_err(SyncError::io)?;
@@ -535,6 +615,64 @@ impl SyncEngine {
                 }
                 self.last_seq = upto;
                 self.persist_cursor()?;
+            }
+            ServerMsg::SnapshotPart {
+                upto_seq: _,
+                idx: _,
+                of: _,
+                blob,
+            } => {
+                // One part of a chunked snapshot. Every cleartext field is
+                // the relay's claim — set membership travels sealed. Parts
+                // apply immediately (idempotent full states), but the
+                // cursor advances only once a complete consistent set has
+                // been applied: a relay withholding or splicing parts can
+                // stall us, never leapfrog us past content we didn't get.
+                let payload: SyncPayload =
+                    crypto::open(&self.keys.vault_key, &self.keys.vault_id, &blob)?;
+                let Some(part) = payload.snapshot_part else {
+                    return Ok(effect); // not a snapshot part — never jump the cursor
+                };
+                if part.upto <= self.last_seq || part.of == 0 || part.idx >= part.of {
+                    return Ok(effect); // already covered, or nonsense membership
+                }
+                for update in &payload.updates {
+                    self.docs
+                        .apply_remote(&update.doc, &update.u)
+                        .map_err(SyncError::io)?;
+                    effect.dirty_items.push(update.doc.clone());
+                }
+                effect.updates = payload.updates;
+                // Same crash-safe order as Snapshot: queue before cursor.
+                if !effect.dirty_items.is_empty() {
+                    self.pending_apply
+                        .extend(effect.dirty_items.iter().cloned());
+                    self.persist_pending_apply()?;
+                }
+                match &mut self.snapshot_parts {
+                    Some(t) if t.upto == part.upto && t.of == part.of => {
+                        t.seen.insert(part.idx);
+                    }
+                    // A part from a different set restarts the tracking —
+                    // sets never mix, so cross-generation splices can only
+                    // stall, not complete.
+                    _ => {
+                        self.snapshot_parts = Some(PartTracker {
+                            upto: part.upto,
+                            of: part.of,
+                            seen: BTreeSet::from([part.idx]),
+                        });
+                    }
+                }
+                let complete = self
+                    .snapshot_parts
+                    .as_ref()
+                    .is_some_and(|t| t.seen.len() as u32 == t.of);
+                if complete {
+                    self.snapshot_parts = None;
+                    self.last_seq = part.upto;
+                    self.persist_cursor()?;
+                }
             }
             ServerMsg::Compacted { .. } => {
                 // Our compact offer was accepted — informational only.
@@ -1102,7 +1240,19 @@ mod tests {
             panic!("hello is hello");
         };
         assert!(caps.iter().any(|c| c == CAP_COMPACT));
+        assert!(caps.iter().any(|c| c == CAP_COMPACT2));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The default-budget offer for a small vault: exactly one legacy
+    /// `compact` frame (byte-identical behavior to 0.22).
+    fn single_compact(engine: &mut SyncEngine) -> (u64, Vec<u8>) {
+        let mut offer = engine.snapshot_state_parts(SNAPSHOT_PART_BUDGET).unwrap();
+        assert_eq!(offer.len(), 1, "small vault → one frame");
+        let Some(ClientMsg::Compact { upto_seq, blob }) = offer.pop() else {
+            panic!("expected a compact offer");
+        };
+        (upto_seq, blob)
     }
 
     #[test]
@@ -1127,9 +1277,7 @@ mod tests {
 
         // The snapshot alone (no log!) reconstructs a fresh device —
         // including the delete, which must survive compaction.
-        let ClientMsg::Compact { upto_seq, blob } = a.snapshot_state().unwrap() else {
-            panic!("expected a compact offer");
-        };
+        let (upto_seq, blob) = single_compact(&mut a);
         assert_eq!(upto_seq, a.last_seq());
 
         let mut b = SyncEngine::open(&db, &code).unwrap();
@@ -1161,9 +1309,7 @@ mod tests {
         let pushes = a.tick_scan().unwrap();
         push_all(&mut a, &mut relay, pushes);
         drain(&mut a, &relay);
-        let ClientMsg::Compact { upto_seq, blob } = a.snapshot_state().unwrap() else {
-            panic!("expected a compact offer");
-        };
+        let (upto_seq, blob) = single_compact(&mut a);
 
         {
             let mut b = SyncEngine::open(&db, &code).unwrap();
@@ -1222,9 +1368,7 @@ mod tests {
         let pushes = a.tick_scan().unwrap();
         push_all(&mut a, &mut relay, pushes);
         drain(&mut a, &relay);
-        let ClientMsg::Compact { upto_seq, blob } = a.snapshot_state().unwrap() else {
-            panic!("expected a compact offer");
-        };
+        let (upto_seq, blob) = single_compact(&mut a);
 
         // B already replayed the whole log — the snapshot is old news.
         let mut b = SyncEngine::open(&db, &code).unwrap();
@@ -1235,6 +1379,223 @@ mod tests {
             .unwrap();
         assert_eq!(b.last_seq(), before, "cursor never moves backwards");
         assert!(effect.dirty_items.is_empty(), "nothing re-queued");
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    /// A chunked offer replayed as the server frames a lagging client sees.
+    fn as_snapshot_parts(frames: Vec<ClientMsg>) -> Vec<ServerMsg> {
+        frames
+            .into_iter()
+            .map(|m| match m {
+                ClientMsg::CompactPart {
+                    upto_seq,
+                    idx,
+                    of,
+                    blob,
+                } => ServerMsg::SnapshotPart {
+                    upto_seq,
+                    idx,
+                    of,
+                    blob,
+                },
+                other => panic!("expected compact_part, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_state_parts_single_part_carries_legacy_inner_fields() {
+        let dir = temp_vault("parts-legacy");
+        let code = VaultCode::generate();
+        fs::write(dir.join("note.md"), "content\n").unwrap();
+        let mut a = SyncEngine::open(&dir, &code).unwrap();
+        let mut relay = FakeRelay::default();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+
+        // Under budget → the 0.22 frame, with the 0.22 inner shape: the new
+        // key must not appear, or 0.22 peers would see changed wire bytes.
+        let (upto_seq, blob) = single_compact(&mut a);
+        let keys = crypto::derive_keys(&code);
+        let payload: SyncPayload = crypto::open(&keys.vault_key, &keys.vault_id, &blob).unwrap();
+        assert_eq!(payload.snapshot_upto, Some(upto_seq));
+        assert_eq!(payload.snapshot_part, None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_state_parts_splits_and_a_fresh_device_converges() {
+        let da = temp_vault("parts-split-a");
+        let db = temp_vault("parts-split-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        fs::write(da.join("one.md"), "first note\n").unwrap();
+        fs::write(da.join("two.md"), "second note\n").unwrap();
+        fs::write(da.join("gone.md"), "delete me\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        fs::remove_file(da.join("gone.md")).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        let upto = a.last_seq();
+
+        // A tiny budget forces the multi-part path without MB fixtures.
+        let offer = a.snapshot_state_parts(64).unwrap();
+        assert!(offer.len() >= 2, "tiny budget → several parts");
+        let of = offer.len() as u32;
+        for (i, frame) in offer.iter().enumerate() {
+            let ClientMsg::CompactPart {
+                upto_seq,
+                idx,
+                of: frame_of,
+                blob,
+            } = frame
+            else {
+                panic!("expected compact_part frames");
+            };
+            assert_eq!(*upto_seq, upto);
+            assert_eq!(*idx, i as u32, "parts are emitted in order");
+            assert_eq!(*frame_of, of, "every part declares the same set size");
+            // Parts must be inert for pre-0.23 clients: no snapshot_upto.
+            let keys = crypto::derive_keys(&code);
+            let payload: SyncPayload = crypto::open(&keys.vault_key, &keys.vault_id, blob).unwrap();
+            assert_eq!(payload.snapshot_upto, None);
+            assert_eq!(
+                payload.snapshot_part,
+                Some(crate::SnapshotPart {
+                    upto,
+                    idx: i as u32,
+                    of
+                })
+            );
+        }
+
+        // A fresh device converges from the parts alone (no log) — and the
+        // cursor holds at 0 until the final part completes the set.
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        let frames = as_snapshot_parts(offer);
+        let last = frames.len() - 1;
+        for (i, frame) in frames.into_iter().enumerate() {
+            b.on_server_msg(frame).unwrap();
+            if i < last {
+                assert_eq!(b.last_seq(), 0, "incomplete set never moves the cursor");
+            }
+        }
+        assert_eq!(b.last_seq(), upto, "complete set jumps to the covered seq");
+        assert_eq!(
+            b.materialize("n:one").unwrap().as_deref(),
+            Some("first note\n")
+        );
+        assert_eq!(
+            b.materialize("n:two").unwrap().as_deref(),
+            Some("second note\n")
+        );
+        assert_eq!(
+            b.materialize("n:gone").unwrap(),
+            None,
+            "tombstone rides the parts"
+        );
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn snapshot_parts_incomplete_set_never_advances_cursor() {
+        let da = temp_vault("parts-hold-a");
+        let db = temp_vault("parts-hold-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        fs::write(da.join("one.md"), "one\n").unwrap();
+        fs::write(da.join("two.md"), "two\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        let upto = a.last_seq();
+        let frames = as_snapshot_parts(a.snapshot_state_parts(64).unwrap());
+        assert!(frames.len() >= 2);
+
+        // A relay withholding the last part stalls the cursor forever —
+        // content applies (idempotent), coverage is never claimed.
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        let last = frames.len() - 1;
+        for frame in &frames[..last] {
+            let effect = b.on_server_msg(frame.clone()).unwrap();
+            assert!(!effect.updates.is_empty(), "part content still applies");
+        }
+        assert_eq!(b.last_seq(), 0, "withheld part → no coverage claim");
+
+        // Full re-delivery (what a reconnect does) completes the set.
+        for frame in frames {
+            b.on_server_msg(frame).unwrap();
+        }
+        assert_eq!(b.last_seq(), upto);
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn snapshot_parts_ignore_forged_and_cross_generation_blobs() {
+        let da = temp_vault("parts-forge-a");
+        let db = temp_vault("parts-forge-b");
+        let code = VaultCode::generate();
+        let mut relay = FakeRelay::default();
+
+        fs::write(da.join("one.md"), "gen one\n").unwrap();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        fs::write(da.join("two.md"), "gen two\n").unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+
+        // Two snapshot generations of the same vault (the second covers one
+        // more seq), both chunked.
+        let gen1 = as_snapshot_parts(a.snapshot_state_parts(64).unwrap());
+        fs::write(da.join("three.md"), "gen two extra\n").unwrap();
+        let pushes = a.tick_scan().unwrap();
+        push_all(&mut a, &mut relay, pushes);
+        drain(&mut a, &relay);
+        let upto2 = a.last_seq();
+        let gen2 = as_snapshot_parts(a.snapshot_state_parts(64).unwrap());
+
+        let mut b = SyncEngine::open(&db, &code).unwrap();
+        // An ORDINARY push blob framed as a snapshot part (no inner
+        // snapshot_part) is a no-op — the anti-forgery rule.
+        let effect = b
+            .on_server_msg(ServerMsg::SnapshotPart {
+                upto_seq: 999,
+                idx: 0,
+                of: 1,
+                blob: relay.log[0].clone(),
+            })
+            .unwrap();
+        assert_eq!(b.last_seq(), 0, "forged membership is ignored");
+        assert!(effect.dirty_items.is_empty());
+
+        // Splicing parts across generations never completes a set: any
+        // part from a different (upto, of) restarts the tracking.
+        b.on_server_msg(gen2[0].clone()).unwrap();
+        b.on_server_msg(gen1[0].clone()).unwrap();
+        for frame in &gen2[1..] {
+            b.on_server_msg(frame.clone()).unwrap();
+        }
+        assert_eq!(b.last_seq(), 0, "interrupted set never claims coverage");
+
+        // A contiguous, complete generation does.
+        for frame in gen2 {
+            b.on_server_msg(frame).unwrap();
+        }
+        assert_eq!(b.last_seq(), upto2);
         fs::remove_dir_all(&da).ok();
         fs::remove_dir_all(&db).ok();
     }

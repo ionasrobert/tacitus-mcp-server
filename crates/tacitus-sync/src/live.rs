@@ -23,9 +23,12 @@ use crate::client::{connect_ws, ensure_crypto_provider};
 use crate::coedit::CoeditKind;
 use crate::crypto::DocUpdate;
 use crate::docs::MirrorDoc;
-use crate::engine::SyncEngine;
+use crate::engine::{SyncEngine, SNAPSHOT_PART_BUDGET};
 use crate::presence::{Peer, PeerTracker, PresenceState};
-use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
+use crate::protocol::{
+    parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE,
+    COMPACT_REFUSALS,
+};
 use crate::SyncError;
 
 /// The relay drops ephemeral frames whose base64 exceeds 8 KiB — anything
@@ -74,6 +77,9 @@ pub struct LiveConfig {
     /// When the Welcome reports a relay log bigger than this, a caught-up
     /// session offers a compaction snapshot (once per session). 0 disables.
     pub compact_threshold: u64,
+    /// Per-part packing budget for chunked snapshots (tests shrink it to
+    /// force multi-part offers without MB fixtures).
+    pub snapshot_part_budget: usize,
 }
 
 impl LiveConfig {
@@ -92,6 +98,7 @@ impl LiveConfig {
             presence_debounce: Duration::from_millis(300),
             coedit_durable_debounce: Duration::from_secs(2),
             compact_threshold: 4 * 1024 * 1024,
+            snapshot_part_budget: SNAPSHOT_PART_BUDGET,
         }
     }
 }
@@ -489,6 +496,7 @@ where
     // Compaction: armed by the Welcome (cap + log size), fired at most once
     // per session, right after catching up.
     let mut compact_on = false;
+    let mut compact2_on = false;
     let mut welcome_log_bytes = 0u64;
     let mut compact_offered = false;
     let mut next_presence = Instant::now() + config.presence_interval;
@@ -605,6 +613,7 @@ where
                     target = Some(*latest_seq);
                     presence_on = caps.iter().any(|c| c == CAP_PRESENCE);
                     compact_on = caps.iter().any(|c| c == CAP_COMPACT);
+                    compact2_on = caps.iter().any(|c| c == CAP_COMPACT2);
                     welcome_log_bytes = *log_bytes;
                     on_event(LiveEvent::Connected {
                         latest_seq: *latest_seq,
@@ -635,11 +644,25 @@ where
                 if let ServerMsg::Compacted { upto_seq } = &msg {
                     on_event(LiveEvent::Compacted { upto_seq: *upto_seq });
                 }
+                // A refused compaction offer is advisory (log untouched,
+                // connection fine) — losing the race to another device is
+                // that device doing our job, never worth dying over. The
+                // chunked upload window makes the race realistic.
+                if let ServerMsg::Err { code, .. } = &msg {
+                    if compact_offered && COMPACT_REFUSALS.contains(&code.as_str()) {
+                        continue;
+                    }
+                }
                 // Fold-before-apply: local disk state enters the CRDT before
                 // this update does, so concurrent edits merge instead of the
                 // stale snapshot erasing the remote edit later. A snapshot is
-                // just a big update — same hazard, same fold.
-                if matches!(msg, ServerMsg::Update { .. } | ServerMsg::Snapshot { .. })
+                // just a big update — same hazard, same fold (parts too).
+                if matches!(
+                    msg,
+                    ServerMsg::Update { .. }
+                        | ServerMsg::Snapshot { .. }
+                        | ServerMsg::SnapshotPart { .. }
+                )
                     && last_scan.elapsed() >= config.fold_guard
                 {
                     if let Some(reason) =
@@ -687,9 +710,19 @@ where
                                 && engine.last_seq() > 0
                             {
                                 compact_offered = true;
-                                let offer = [engine.snapshot_state()?];
-                                if let Some(reason) = send_all(&mut sink, &offer).await? {
-                                    return Ok(SessionEnd::Network(reason));
+                                let offer =
+                                    engine.snapshot_state_parts(config.snapshot_part_budget)?;
+                                let chunked = offer
+                                    .iter()
+                                    .any(|m| matches!(m, ClientMsg::CompactPart { .. }));
+                                // A chunked offer needs compact2 on the
+                                // relay; without it, stay silent this
+                                // session (presence-off precedent) — the
+                                // vault simply doesn't compact yet.
+                                if !chunked || compact2_on {
+                                    if let Some(reason) = send_all(&mut sink, &offer).await? {
+                                        return Ok(SessionEnd::Network(reason));
+                                    }
                                 }
                             }
                         }
@@ -954,6 +987,10 @@ mod tests {
             "a peer survives two lost heartbeats before expiring"
         );
         assert!(config.presence_debounce < Duration::from_secs(1));
+        assert!(
+            config.snapshot_part_budget >= 1024 * 1024,
+            "real sessions never chunk a snapshot that one frame could carry"
+        );
         assert!(
             config.coedit_durable_debounce >= Duration::from_secs(1),
             "keystrokes batch into the log, they don't spam it"

@@ -33,6 +33,29 @@ pub const CAP_PRESENCE: &str = "presence";
 /// error instead of silent divergence.
 pub const CAP_COMPACT: &str = "compact";
 
+/// Capability for CHUNKED compaction (strict superset of `compact`): a
+/// snapshot too big for one `compact` frame travels as an ordered series of
+/// separately-sealed `compact_part` frames, and is served back the same way
+/// (`snapshot_part`). Single-part snapshots keep the legacy frames, so a
+/// vault that fits 32 MiB behaves byte-identically to 0.22. A compact-only
+/// client below a MULTI-part snapshot gets `err {code:"compacted"}` — the
+/// same honest fatal 0.21 clients get below any snapshot.
+pub const CAP_COMPACT2: &str = "compact2";
+
+/// Relay refusals of a compaction offer. Advisory by design (the log is
+/// untouched, the connection survives), so the live driver must not die on
+/// them — losing a compaction race is another device doing our job.
+/// `"compacted"` is deliberately NOT here: that one is fatal.
+#[cfg_attr(not(feature = "client"), allow(dead_code))]
+pub(crate) const COMPACT_REFUSALS: [&str; 6] = [
+    "compact_stale",
+    "compact_ahead",
+    "snapshot_too_large",
+    "compact_part_too_large",
+    "compact_too_large",
+    "compact_part_order",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -61,6 +84,18 @@ pub enum ClientMsg {
     /// so a hostile relay can't forge coverage claims.
     Compact {
         upto_seq: u64,
+        #[serde(with = "b64")]
+        blob: Vec<u8>,
+    },
+    /// One part of a chunked compaction offer, sent in order `0..of-1` on
+    /// one connection; the relay stages parts and commits on the last,
+    /// replying `compacted`. Only sent when the relay advertised
+    /// `compact2`. Each part is independently sealed; its set membership
+    /// travels inside the ciphertext (`SyncPayload.snapshot_part`).
+    CompactPart {
+        upto_seq: u64,
+        idx: u32,
+        of: u32,
         #[serde(with = "b64")]
         blob: Vec<u8>,
     },
@@ -106,6 +141,18 @@ pub enum ServerMsg {
         #[serde(with = "b64")]
         blob: Vec<u8>,
     },
+    /// One part of a chunked snapshot, served in place of `snapshot` (and
+    /// only to compact2 connections) when the stored snapshot is
+    /// multi-part. ALL cleartext fields are the relay's claim — the client
+    /// trusts only the sealed `SyncPayload.snapshot_part` inside, and
+    /// advances its cursor only once a complete consistent set applied.
+    SnapshotPart {
+        upto_seq: u64,
+        idx: u32,
+        of: u32,
+        #[serde(with = "b64")]
+        blob: Vec<u8>,
+    },
     /// Reply to a `compact` push: the log was truncated up to `upto_seq`.
     Compacted {
         upto_seq: u64,
@@ -114,13 +161,14 @@ pub enum ServerMsg {
 
 // Used by the client drivers (feature "client"); tests exercise it always.
 #[cfg_attr(not(feature = "client"), allow(dead_code))]
-const KNOWN_SERVER_TAGS: [&str; 7] = [
+const KNOWN_SERVER_TAGS: [&str; 8] = [
     "welcome",
     "update",
     "ack",
     "err",
     "presence",
     "snapshot",
+    "snapshot_part",
     "compacted",
 ];
 
@@ -213,9 +261,41 @@ mod tests {
         // errors — not tolerant "future tag" skips.
         assert!(parse_server_msg(r#"{"t":"snapshot","upto_seq":"NaN","blob":""}"#).is_err());
         assert!(parse_server_msg(r#"{"t":"compacted"}"#).is_err());
+        assert!(parse_server_msg(r#"{"t":"snapshot_part","upto_seq":1,"idx":0,"blob":""}"#).is_err());
         assert!(matches!(
             parse_server_msg(r#"{"t":"compacted","upto_seq":4}"#),
             Ok(Some(ServerMsg::Compacted { upto_seq: 4 }))
+        ));
+    }
+
+    #[test]
+    fn compact_part_and_snapshot_part_frames_roundtrip_json() {
+        let part = ClientMsg::CompactPart {
+            upto_seq: 12,
+            idx: 1,
+            of: 3,
+            blob: vec![1, 2, 255],
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"t\":\"compact_part\""));
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ClientMsg::CompactPart { upto_seq: 12, idx: 1, of: 3, blob } if blob == vec![1, 2, 255]
+        ));
+
+        let part = ServerMsg::SnapshotPart {
+            upto_seq: 12,
+            idx: 2,
+            of: 3,
+            blob: vec![9, 9],
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"t\":\"snapshot_part\""));
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ServerMsg::SnapshotPart { upto_seq: 12, idx: 2, of: 3, blob } if blob == vec![9, 9]
         ));
     }
 

@@ -9,13 +9,18 @@ use tokio_tungstenite::tungstenite::Message;
 use tacitus_core::vault::NoteWriter;
 
 use crate::apply::ApplyReport;
-use crate::engine::SyncEngine;
-use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT};
+use crate::engine::{SyncEngine, SNAPSHOT_PART_BUDGET};
+use crate::protocol::{parse_server_msg, ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2};
 use crate::SyncError;
 
 /// How long we wait for the relay to say something before deciding the
 /// connection went quiet mid-sync.
 const QUIET_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The post-offer wait during `run_compact`: committing a chunked snapshot
+/// fsyncs the parts and rewrites a possibly ~512 MiB log inside the relay's
+/// select loop, so no frames (not even pings) flow meanwhile.
+const COMPACT_QUIET_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 pub struct RunReport {
@@ -157,6 +162,7 @@ pub async fn run_compact(engine: &mut SyncEngine, relay_url: &str) -> Result<u64
 
     let mut target: Option<u64> = None;
     let mut relay_compacts = false;
+    let mut relay_compacts2 = false;
     let mut offered = false;
     loop {
         if let Some(t) = target {
@@ -171,14 +177,32 @@ pub async fn run_compact(engine: &mut SyncEngine, relay_url: &str) -> Result<u64
                         reason: "relay does not advertise compaction — upgrade the relay".into(),
                     });
                 }
+                let offer = engine.snapshot_state_parts(SNAPSHOT_PART_BUDGET)?;
+                if !relay_compacts2
+                    && offer
+                        .iter()
+                        .any(|m| matches!(m, ClientMsg::CompactPart { .. }))
+                {
+                    return Err(SyncError {
+                        code: "UNSUPPORTED",
+                        reason: "vault snapshot needs chunked compaction — upgrade the relay"
+                            .into(),
+                    });
+                }
                 offered = true;
-                let offer = encode(&engine.snapshot_state()?)?;
-                sink.send(Message::Text(offer.into()))
-                    .await
-                    .map_err(net_err)?;
+                for msg in &offer {
+                    sink.send(Message::Text(encode(msg)?.into()))
+                        .await
+                        .map_err(net_err)?;
+                }
             }
         }
-        let frame = tokio::time::timeout(QUIET_TIMEOUT, stream.next())
+        let quiet = if offered {
+            COMPACT_QUIET_TIMEOUT
+        } else {
+            QUIET_TIMEOUT
+        };
+        let frame = tokio::time::timeout(quiet, stream.next())
             .await
             .map_err(|_| SyncError {
                 code: "NETWORK",
@@ -211,6 +235,7 @@ pub async fn run_compact(engine: &mut SyncEngine, relay_url: &str) -> Result<u64
         {
             target = Some(*latest_seq);
             relay_compacts = caps.iter().any(|c| c == CAP_COMPACT);
+            relay_compacts2 = caps.iter().any(|c| c == CAP_COMPACT2);
         }
         if let ServerMsg::Compacted { upto_seq } = &msg {
             let upto = *upto_seq;

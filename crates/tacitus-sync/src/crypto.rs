@@ -141,6 +141,17 @@ pub struct DocUpdate {
     pub u: Vec<u8>,
 }
 
+/// One part of a chunked compaction snapshot: which set it belongs to and
+/// where in it. Lives inside the ciphertext — a hostile relay can withhold
+/// parts (the cursor just never advances) but cannot forge membership or
+/// splice parts across snapshot generations (AEAD + `upto` mismatch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotPart {
+    pub upto: u64,
+    pub idx: u32,
+    pub of: u32,
+}
+
 /// What actually travels (inside the ciphertext).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPayload {
@@ -153,6 +164,11 @@ pub struct SyncPayload {
     /// never saw — the cleartext `upto_seq` on the wire is advisory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_upto: Option<u64>,
+    /// Present ONLY in chunked snapshot parts. Parts carry `snapshot_upto:
+    /// None` on purpose: a pre-0.23 client fed a part skips it without
+    /// applying or moving its cursor, so parts are harmless everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_part: Option<SnapshotPart>,
 }
 
 /// Encrypt a payload: `nonce(24) || ciphertext`. `aad` binds the blob to
@@ -235,6 +251,7 @@ mod tests {
                 u: vec![1, 2, 3, 4],
             }],
             snapshot_upto: None,
+            snapshot_part: None,
         }
     }
 
@@ -256,6 +273,38 @@ mod tests {
         // And a 0.21 payload (no field) parses with None.
         let old: SyncPayload = serde_json::from_str(&plain).unwrap();
         assert_eq!(old.snapshot_upto, None);
+    }
+
+    #[test]
+    fn snapshot_part_is_absent_from_ordinary_payloads_and_roundtrips() {
+        // Same wire discipline as snapshot_upto: ordinary payloads (and
+        // legacy single-blob snapshots) never carry the key, so 0.21/0.22
+        // bytes are unchanged.
+        let plain = serde_json::to_string(&payload()).unwrap();
+        assert!(!plain.contains("snapshot_part"));
+
+        let part = SyncPayload {
+            snapshot_part: Some(SnapshotPart {
+                upto: 42,
+                idx: 1,
+                of: 3,
+            }),
+            ..payload()
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"snapshot_part\":{\"upto\":42,\"idx\":1,\"of\":3}"));
+        let back: SyncPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.snapshot_part,
+            Some(SnapshotPart {
+                upto: 42,
+                idx: 1,
+                of: 3
+            })
+        );
+        // A 0.22-shaped payload (no field) parses with None.
+        let old: SyncPayload = serde_json::from_str(&plain).unwrap();
+        assert_eq!(old.snapshot_part, None);
     }
 
     #[test]

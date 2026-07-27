@@ -23,13 +23,13 @@ pub mod scan;
 pub mod state;
 
 pub use coedit::{CoeditKind, CoeditPayload};
-pub use crypto::{derive_keys, DocUpdate, Keys, SyncPayload, VaultCode};
+pub use crypto::{derive_keys, DocUpdate, Keys, SnapshotPart, SyncPayload, VaultCode};
 pub use docs::{DocStore, MANIFEST_KEY};
 pub use engine::{EngineEffect, Flag, SyncEngine};
 #[cfg(feature = "client")]
 pub use live::{run_live, LiveCmd, LiveConfig, LiveEvent};
 pub use presence::{Peer, PeerTracker, PresencePayload, PresenceState};
-pub use protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_PRESENCE};
+pub use protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE};
 pub use scan::{scan, ItemKind, ScanDelta, ScanItem};
 pub use state::{ItemState, ShadowState};
 
