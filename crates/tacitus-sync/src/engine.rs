@@ -61,6 +61,11 @@ pub struct SyncEngine {
     /// the relay never redelivers below it, so a crash between receipt and
     /// apply would otherwise lose the file write forever.
     pending_apply: BTreeSet<String>,
+    /// The subset of `pending_apply` that came through co-editing keystrokes
+    /// (`apply_coedit_update`) — the live loop attributes those batches
+    /// "coedit" in the audit log. Deliberately NOT persisted: attribution is
+    /// cosmetic, and after a crash the recovered apply is honestly "sync".
+    pending_coedit: BTreeSet<String>,
 }
 
 fn random_device_id() -> String {
@@ -113,6 +118,7 @@ impl SyncEngine {
             outbox,
             last_seq: cursor.last_seq,
             pending_apply,
+            pending_coedit: BTreeSet::new(),
         };
         engine.persist_cursor()?;
         Ok(engine)
@@ -149,16 +155,24 @@ impl SyncEngine {
     }
 
     /// Applied (or deliberately skipped) keys leave the queue; the fold path
-    /// owns recovery for skips.
+    /// owns recovery for skips. Coedit attribution goes with them — a
+    /// skipped key re-applies later as plain "sync".
     pub(crate) fn clear_pending_apply(&mut self, keys: &[String]) -> Result<(), SyncError> {
         let before = self.pending_apply.len();
         for key in keys {
             self.pending_apply.remove(key);
+            self.pending_coedit.remove(key);
         }
         if self.pending_apply.len() != before {
             self.persist_pending_apply()?;
         }
         Ok(())
+    }
+
+    /// Did this pending item arrive through co-editing keystrokes? (Drives
+    /// the "coedit" audit attribution; false after a restart — see field.)
+    pub fn is_pending_coedit(&self, key: &str) -> bool {
+        self.pending_coedit.contains(key)
     }
 
     pub fn vault_id(&self) -> &str {
@@ -257,6 +271,7 @@ impl SyncEngine {
         self.docs
             .apply_remote(&key, update)
             .map_err(SyncError::io)?;
+        self.pending_coedit.insert(key.clone());
         self.pending_apply.insert(key);
         self.persist_pending_apply()
     }
@@ -905,6 +920,38 @@ mod tests {
         // The receipt survives a crash, exactly like a durable Update.
         let b = SyncEngine::open(&db, &code).unwrap();
         assert_eq!(b.pending_apply(), vec!["n:note"]);
+        fs::remove_dir_all(&da).ok();
+        fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn coedit_attribution_tracks_clears_and_never_survives_a_restart() {
+        let da = temp_vault("coed-attr-a");
+        let db = temp_vault("coed-attr-b");
+        fs::write(da.join("note.md"), "typed live\n").unwrap();
+        let code = VaultCode::generate();
+        let mut a = SyncEngine::open(&da, &code).unwrap();
+        let (_, updates) = a.tick_scan_with_updates().unwrap();
+
+        {
+            let mut b = SyncEngine::open(&db, &code).unwrap();
+            b.apply_coedit_update("note", &updates[0].u).unwrap();
+            assert!(b.is_pending_coedit("n:note"));
+
+            // Applying clears the attribution together with the queue.
+            b.clear_pending_apply(&["n:note".to_string()]).unwrap();
+            assert!(!b.is_pending_coedit("n:note"));
+            assert!(b.pending_apply().is_empty());
+
+            b.apply_coedit_update("note", &updates[0].u).unwrap();
+            assert!(b.is_pending_coedit("n:note"));
+            // Crash with the attribution set.
+        }
+        // The QUEUE survives (crash-safe write), the attribution doesn't —
+        // the recovered apply is honestly plain "sync".
+        let b = SyncEngine::open(&db, &code).unwrap();
+        assert_eq!(b.pending_apply(), vec!["n:note"]);
+        assert!(!b.is_pending_coedit("n:note"));
         fs::remove_dir_all(&da).ok();
         fs::remove_dir_all(&db).ok();
     }

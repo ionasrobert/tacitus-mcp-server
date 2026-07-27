@@ -2048,4 +2048,53 @@ mod tests {
         drop(b.nudge);
         b.task.await.unwrap().unwrap();
     }
+
+    #[tokio::test]
+    async fn coedit_materialization_is_audited_with_coedit_origin() {
+        let url = spawn_relay(temp_dir("attr-data")).await;
+        let va = temp_dir("attr-va");
+        let vb = temp_dir("attr-vb");
+        std::fs::write(va.join("doc.md"), "base\n").unwrap();
+        let code = LiveCode::generate();
+        let fast = |c: &mut LiveConfig| {
+            c.apply_debounce = Duration::from_millis(40);
+            c.coedit_durable_debounce = Duration::from_millis(80);
+        };
+        let a = spawn_live(&va, &code, &url, fast);
+        let b = spawn_live(&vb, &code, &url, fast);
+        wait_until("baseline lands on B", || vb.join("doc.md").exists()).await;
+        let (mut front_a, _front_b) = enter_rooms(&a, &b).await;
+
+        // Room keystrokes materialize on B attributed "coedit"…
+        let update = front_a.insert(0, "typed in the room ");
+        a.nudge
+            .send(LiveCmd::CoeditUpdate {
+                note_id: "doc".into(),
+                update,
+            })
+            .await
+            .unwrap();
+        wait_until("B materializes the room edit", || {
+            std::fs::read_to_string(vb.join("doc.md"))
+                .map(|t| t.contains("typed in the room "))
+                .unwrap_or(false)
+        })
+        .await;
+        let audit_reader = LiveWriter::new(&vb, LiveScope::ReadWrite);
+        let audit = audit_reader.read_audit(1).unwrap();
+        assert_eq!(audit[0].origin.as_deref(), Some("coedit"));
+
+        // …and a PLAIN note synced afterwards goes back to "sync" (the
+        // origin switch restored the writer).
+        std::fs::write(va.join("other.md"), "not a room note\n").unwrap();
+        a.nudge.send(LiveCmd::Nudge).await.unwrap();
+        wait_until("plain note lands on B", || vb.join("other.md").exists()).await;
+        let audit = audit_reader.read_audit(1).unwrap();
+        assert_eq!(audit[0].origin.as_deref(), Some("sync"));
+
+        drop(a.nudge);
+        drop(b.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+    }
 }

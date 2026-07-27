@@ -244,7 +244,10 @@ where
 }
 
 /// Materialize everything in the persisted apply queue (crash-safe source
-/// of truth for "received but not yet on disk").
+/// of truth for "received but not yet on disk"). Items that arrived through
+/// co-editing keystrokes commit as their own batch attributed "coedit" in
+/// the audit log — the host's Activity view distinguishes room edits from
+/// plain sync applies.
 fn flush_pending<F>(
     engine: &mut SyncEngine,
     writer: &mut NoteWriter,
@@ -254,8 +257,24 @@ where
     F: FnMut(LiveEvent),
 {
     let dirty = engine.pending_apply();
-    if !dirty.is_empty() {
-        let report = engine.apply_dirty(writer, &dirty)?;
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    let (coedit, rest): (Vec<String>, Vec<String>) = dirty
+        .into_iter()
+        .partition(|key| engine.is_pending_coedit(key));
+    if !coedit.is_empty() {
+        let prev: Option<String> = writer.origin().map(str::to_string);
+        writer.set_origin("coedit");
+        let result = engine.apply_dirty(writer, &coedit);
+        match prev {
+            Some(p) => writer.set_origin(p),
+            None => writer.clear_origin(),
+        }
+        on_event(LiveEvent::Applied(result?));
+    }
+    if !rest.is_empty() {
+        let report = engine.apply_dirty(writer, &rest)?;
         on_event(LiveEvent::Applied(report));
     }
     Ok(())

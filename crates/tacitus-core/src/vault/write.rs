@@ -261,6 +261,17 @@ impl NoteWriter {
         self.origin = Some(origin.into());
     }
 
+    /// The current origin — callers that switch it temporarily (e.g. the
+    /// live loop attributing co-edit batches) save and restore through this.
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
+    }
+
+    /// Back to unattributed (a direct write, no origin badge).
+    pub fn clear_origin(&mut self) {
+        self.origin = None;
+    }
+
     fn note_path(&self, note_id: &str) -> PathBuf {
         self.vault_dir.join(format!("{note_id}.md"))
     }
@@ -1019,6 +1030,37 @@ mod tests {
         assert_eq!(audit[1].origin, None);
         // Old log lines (no origin field) still parse: default() covered by
         // the entry written before set_origin.
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn origin_getter_and_clear_support_save_and_restore() {
+        let dir = temp_vault("origin-restore");
+        let mut writer = NoteWriter::new(&dir, PermissionScope::ReadWrite);
+        assert_eq!(writer.origin(), None);
+        writer.set_origin("sync");
+        assert_eq!(writer.origin(), Some("sync"));
+
+        // The save-switch-restore dance the live loop does per batch.
+        let prev = writer.origin().map(str::to_string);
+        writer.set_origin("coedit");
+        writer
+            .create_note("room-note", "materialized", None)
+            .unwrap();
+        match prev {
+            Some(p) => writer.set_origin(p),
+            None => writer.clear_origin(),
+        }
+        writer
+            .create_note("plain-note", "sync batch", None)
+            .unwrap();
+
+        let audit = writer.read_audit(2).unwrap();
+        assert_eq!(audit[0].origin.as_deref(), Some("sync"));
+        assert_eq!(audit[1].origin.as_deref(), Some("coedit"));
+
+        writer.clear_origin();
+        assert_eq!(writer.origin(), None);
         fs::remove_dir_all(&dir).ok();
     }
 }
