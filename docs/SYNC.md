@@ -19,6 +19,9 @@ tacitus-mcp sync run --vault ~/vault
 
 # live mode: one persistent relay connection — remote edits land in ~1s
 tacitus-mcp sync run --live --vault ~/vault
+
+# force a relay-log compaction now (live sessions also do this on their own)
+tacitus-mcp sync compact --vault ~/vault
 ```
 
 `--live` holds a single WebSocket open instead of a pass every tick: remote
@@ -93,14 +96,52 @@ over 8 KiB (huge pastes) skip the fast tier and go durable immediately.
 Requires a 0.20+ relay; older peers ignore the frames (AEAD, like
 presence).
 
+Each room tracks its **durable frontier** (a mirror of exactly what the log
+covers): flushes diff against it, so a checkpoint a peer already pushed is
+never re-logged. Every room member is also a **witness** — if the author
+crashes before its own ~2s flush, a peer that saw the keystrokes
+ephemerally checkpoints them durably (on a 3× deadline, so the author
+usually wins and the witness flush no-ops). Room materializations are
+audited with `origin: "coedit"` (plain sync applies stay `"sync"`; after a
+crash, recovered applies are attributed `"sync"` — the attribution is
+cosmetic and deliberately not persisted).
+
+## Compaction (bounded relay log)
+
+The relay can't compact its own log — it never sees plaintext, so it can't
+merge CRDT updates. Compaction is **client-driven**: a caught-up client
+seals its full state (every doc + the tombstone manifest, so deletes
+survive) as one snapshot and offers it with `compact {upto_seq, blob}`.
+The relay stores the snapshot, drops every log entry at or below
+`upto_seq` (seqs never renumber; the previous log is kept one generation
+as `log.prev.jsonl`), and replies `compacted {upto_seq}`. Anyone whose
+cursor is below the snapshot gets `snapshot {upto_seq, blob}` before the
+tail — a snapshot is just a big idempotent update, so overlap is harmless
+and a fresh device converges from snapshot + tail alone.
+
+Live sessions compact automatically: `welcome.log_bytes` reports the log's
+size, and a caught-up session whose threshold (default 4 MB) is exceeded
+offers a snapshot once per session. `sync compact` forces one.
+
+Trust: the covered seq also travels **inside** the ciphertext
+(`snapshot_upto`) and clients advance their cursor only from that inner
+value — a hostile relay can't pin a forged `upto_seq` onto some other blob
+to leapfrog a client past entries it never delivered. (A hostile relay can
+still *withhold* data; that's inherent to relays and unchanged.)
+
+Limits: snapshots over 32 MB are refused (`snapshot_too_large`) — such
+vaults simply don't compact yet (chunked snapshots are future work) and
+grow toward the 512 MB backstop cap.
+
 ## Protocol (for relay implementers)
 
 WebSocket, JSON text frames, blobs base64. Client → `hello {vault_id,
-token, since_seq, caps}`; server → `welcome {latest_seq, caps}` + backlog
-`update {seq, blob}`… then live updates. Client `push {blob}` → `ack {seq}`
-+ fanout to ALL of the vault's connections, pusher included (cursors
-advance only through the update stream). Auth is trust-on-first-use per
-vault. Per-vault append-only JSONL log, fsynced; 512 MB cap in beta.
+token, since_seq, caps}`; server → `welcome {latest_seq, caps, log_bytes}`
++ backlog `update {seq, blob}`… then live updates. Client `push {blob}` →
+`ack {seq}` + fanout to ALL of the vault's connections, pusher included
+(cursors advance only through the update stream). Auth is
+trust-on-first-use per vault. Per-vault append-only JSONL log, fsynced;
+512 MB backstop cap, bounded in practice by compaction.
 
 **Extensions & compatibility:** new message *variants* are parse errors for
 old peers, so they are capability-gated: a client lists what it speaks in
@@ -112,6 +153,15 @@ seq, never acks it, and drops blobs over 8 KiB. Clients skip well-formed
 frames with unknown tags instead of dying, so future extensions stay
 deployable.
 
+The second extension is `compact` (see above): `compact {upto_seq, blob}` →
+`compacted {upto_seq}` or a structured refusal (`compact_stale`,
+`compact_ahead`, `snapshot_too_large`); `snapshot {upto_seq, blob}` is only
+ever sent to connections that advertised the cap. A capless client whose
+`since_seq` is below the snapshot gets `err {code: "compacted"}` — an
+honest fatal error instead of a silent gap (0.21 and older clients below a
+compaction must upgrade; at or past it they work untouched). WS frame
+limits are raised to 64 MiB on both ends to fit snapshots.
+
 ## Caveats
 
 - Don't point sync at a vault that's also inside Dropbox/iCloud sync —
@@ -119,4 +169,5 @@ deployable.
 - One sync process per vault per device: don't run `sync run` (live or not)
   against a vault the desktop app is already live-syncing — two engines
   race on the same `.tacitus/sync/` state.
-- Compaction isn't implemented yet; very active vaults grow the relay log.
+- Vaults whose full state exceeds 32 MB can't compact yet; their relay log
+  keeps growing toward the 512 MB cap.
