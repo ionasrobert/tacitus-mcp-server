@@ -34,7 +34,7 @@ use hub::{valid_vault_id, RelayState, VaultHub};
 /// an old client can never receive a tag it can't parse. A client below a
 /// compaction snapshot WITHOUT the compact cap is rejected honestly
 /// (`err compacted`) instead of silently missing the compacted prefix.
-const RELAY_CAPS: [&str; 2] = ["presence", "compact"];
+const RELAY_CAPS: [&str; 3] = ["presence", "compact", "compact2"];
 
 /// Presence blobs are ephemeral (never logged) so the log cap doesn't bound
 /// them — this does. Real payloads are ~300 bytes.
@@ -59,6 +59,15 @@ enum ClientMsg {
     /// A sealed full-state snapshot covering the log up to `upto_seq` —
     /// the relay truncates beneath it (still opaque ciphertext).
     Compact { upto_seq: u64, blob: String },
+    /// One part of a chunked snapshot offer (compact2), staged on disk and
+    /// committed when the last part arrives. Parts must come in order on
+    /// one connection; a violation discards the staging (advisory error).
+    CompactPart {
+        upto_seq: u64,
+        idx: u32,
+        of: u32,
+        blob: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +94,14 @@ enum ServerMsg {
     },
     Snapshot {
         upto_seq: u64,
+        blob: String,
+    },
+    /// One part of a chunked snapshot, served in place of `snapshot` (only
+    /// to compact2 connections) when the stored snapshot is multi-part.
+    SnapshotPart {
+        upto_seq: u64,
+        idx: u32,
+        of: u32,
         blob: String,
     },
     Compacted {
@@ -141,6 +158,71 @@ async fn reject(mut socket: WebSocket, code: &str, msg: &str) {
     .await;
 }
 
+/// Map a compaction refusal onto its structured wire code and send it.
+/// Rejections are advisory — the log is untouched and the connection lives
+/// on. Returns false only when the socket died.
+async fn send_compact_refusal(socket: &mut WebSocket, e: &std::io::Error) -> bool {
+    let reason = e.to_string();
+    let code = [
+        "compact_stale",
+        "compact_ahead",
+        "snapshot_too_large",
+        "compact_part_too_large",
+        "compact_too_large",
+        "compact_part_order",
+    ]
+    .into_iter()
+    .find(|known| reason.contains(known))
+    .unwrap_or("storage");
+    if code == "storage" {
+        tracing::error!("compact failed: {e}");
+    }
+    send(
+        socket,
+        &ServerMsg::Err {
+            code: code.into(),
+            msg: reason,
+        },
+    )
+    .await
+}
+
+/// Serve the stored snapshot to a lagging client, one part per short lock —
+/// resident memory stays at one part no matter the vault size. A single
+/// part goes as the legacy `snapshot` frame (0.22 serving unchanged);
+/// multi-part as `snapshot_part` 0..of-1. Returns false when the socket
+/// died or a newer compaction swapped the snapshot mid-serve — the caller
+/// closes, and the reconnect gets the fresh one.
+async fn send_snapshot(socket: &mut WebSocket, hub: &VaultHub, seq: u64, parts: u32) -> bool {
+    for idx in 0..parts {
+        let part = {
+            let log = hub.log.lock().await;
+            if log.snapshot_seq() != Some(seq) {
+                return false;
+            }
+            log.snapshot_part(idx)
+        };
+        let Ok(blob) = part else { return false };
+        let msg = if parts == 1 {
+            ServerMsg::Snapshot {
+                upto_seq: seq,
+                blob: b64_encode(&blob),
+            }
+        } else {
+            ServerMsg::SnapshotPart {
+                upto_seq: seq,
+                idx,
+                of: parts,
+                blob: b64_encode(&blob),
+            }
+        };
+        if !send(socket, &msg).await {
+            return false;
+        }
+    }
+    true
+}
+
 /// Await a presence frame when subscribed; pend forever when not. Lets the
 /// select! below stay guard-free (an unsubscribed connection simply never
 /// completes this arm).
@@ -174,6 +256,7 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
     let (vault_id, token, since_seq, caps) = hello;
     let wants_presence = caps.iter().any(|c| c == "presence");
     let wants_compact = caps.iter().any(|c| c == "compact");
+    let wants_compact2 = caps.iter().any(|c| c == "compact2");
 
     if !valid_vault_id(&vault_id) {
         return reject(
@@ -207,16 +290,13 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
     let (latest_seq, log_bytes, snapshot, backlog) = {
         let log = hub.log.lock().await;
         // A cursor below the snapshot replays snapshot-then-tail; everyone
-        // else replays a plain tail from where they left off.
-        let snapshot_seq = log.snapshot().map(|(seq, _)| seq).unwrap_or(0);
-        let (snapshot, from) = if since_seq < snapshot_seq {
-            (
-                log.snapshot().map(|(seq, blob)| (seq, blob.to_vec())),
-                snapshot_seq,
-            )
-        } else {
-            (None, since_seq)
+        // else replays a plain tail from where they left off. Only (seq,
+        // parts) is captured — the bytes are read per-part while serving.
+        let snapshot = match log.snapshot_seq() {
+            Some(seq) if since_seq < seq => Some((seq, log.snapshot_parts())),
+            _ => None,
         };
+        let from = snapshot.map(|(seq, _)| seq).unwrap_or(since_seq);
         (
             log.last_seq(),
             log.log_bytes(),
@@ -224,15 +304,19 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
             log.read_since(from),
         )
     };
-    if snapshot.is_some() && !wants_compact {
+    if let Some((_, parts)) = snapshot {
         // The compacted prefix no longer exists as entries, and this client
-        // can't parse a snapshot frame it didn't ask for — fail honestly.
-        return reject(
-            socket,
-            "compacted",
-            "log compacted past your cursor; upgrade this client",
-        )
-        .await;
+        // can't parse frames it didn't ask for — fail honestly. Multi-part
+        // needs compact2; compact-only clients get the same treatment 0.21
+        // clients get below any snapshot.
+        if !wants_compact || (parts > 1 && !wants_compact2) {
+            return reject(
+                socket,
+                "compacted",
+                "log compacted past your cursor; upgrade this client",
+            )
+            .await;
+        }
     }
     let backlog = match backlog {
         Ok(backlog) => backlog,
@@ -250,16 +334,8 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
         return;
     }
     let mut last_sent = since_seq;
-    if let Some((snapshot_seq, blob)) = snapshot {
-        if !send(
-            &mut socket,
-            &ServerMsg::Snapshot {
-                upto_seq: snapshot_seq,
-                blob: b64_encode(&blob),
-            },
-        )
-        .await
-        {
+    if let Some((snapshot_seq, parts)) = snapshot {
+        if !send_snapshot(&mut socket, &hub, snapshot_seq, parts).await {
             return;
         }
         last_sent = snapshot_seq;
@@ -281,6 +357,10 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
 
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await; // first tick fires immediately — skip it
+
+    // This connection's in-progress chunked upload; dropped (dir removed)
+    // on disconnect or on any ordering violation.
+    let mut staging: Option<log::PartStaging> = None;
 
     loop {
         tokio::select! {
@@ -348,20 +428,73 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                                         }
                                     }
                                     Err(e) => {
-                                        // Rejections are advisory — the log is
-                                        // untouched and the connection lives on.
-                                        let reason = e.to_string();
-                                        let code = ["compact_stale", "compact_ahead", "snapshot_too_large"]
-                                            .into_iter()
-                                            .find(|known| reason.contains(known))
-                                            .unwrap_or("storage");
-                                        if code == "storage" {
-                                            tracing::error!("compact failed: {e}");
+                                        if !send_compact_refusal(&mut socket, &e).await {
+                                            return;
                                         }
-                                        let _ = send(&mut socket, &ServerMsg::Err {
-                                            code: code.into(),
-                                            msg: reason,
-                                        }).await;
+                                    }
+                                }
+                            }
+                            Ok(ClientMsg::CompactPart { upto_seq, idx, of, blob }) => {
+                                let Some(bytes) = b64_decode(&blob) else {
+                                    staging = None;
+                                    let _ = send(&mut socket, &ServerMsg::Err {
+                                        code: "protocol".into(),
+                                        msg: "compact_part blob is not base64".into(),
+                                    }).await;
+                                    continue;
+                                };
+                                // Parts must arrive in order and agree on
+                                // (upto, of); anything else discards the
+                                // staging — advisory, like every refusal.
+                                let in_order = match &staging {
+                                    None => idx == 0,
+                                    Some(s) => {
+                                        idx == s.next_idx()
+                                            && upto_seq == s.upto_seq()
+                                            && of == s.of()
+                                    }
+                                };
+                                if !in_order {
+                                    staging = None;
+                                    let _ = send(&mut socket, &ServerMsg::Err {
+                                        code: "compact_part_order".into(),
+                                        msg: "parts must arrive in order for one offer".into(),
+                                    }).await;
+                                    continue;
+                                }
+                                if staging.is_none() {
+                                    match hub.log.lock().await.stage_parts(upto_seq, of) {
+                                        Ok(s) => staging = Some(s),
+                                        Err(e) => {
+                                            if !send_compact_refusal(&mut socket, &e).await {
+                                                return;
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+                                let st = staging.as_mut().expect("staged above");
+                                if let Err(e) = st.add(&bytes) {
+                                    staging = None;
+                                    if !send_compact_refusal(&mut socket, &e).await {
+                                        return;
+                                    }
+                                    continue;
+                                }
+                                if st.next_idx() == st.of() {
+                                    let full = staging.take().expect("staged above");
+                                    let result = hub.log.lock().await.commit_parts(full);
+                                    match result {
+                                        Ok(()) => {
+                                            if !send(&mut socket, &ServerMsg::Compacted { upto_seq }).await {
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if !send_compact_refusal(&mut socket, &e).await {
+                                                return;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -405,28 +538,23 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                         // error for a client that can't parse snapshots).
                         let (snapshot, resync) = {
                             let log = hub.log.lock().await;
-                            let snapshot_seq = log.snapshot().map(|(seq, _)| seq).unwrap_or(0);
-                            if last_sent < snapshot_seq {
-                                (
-                                    log.snapshot().map(|(seq, blob)| (seq, blob.to_vec())),
-                                    log.read_since(snapshot_seq),
-                                )
-                            } else {
-                                (None, log.read_since(last_sent))
+                            match log.snapshot_seq() {
+                                Some(seq) if last_sent < seq => (
+                                    Some((seq, log.snapshot_parts())),
+                                    log.read_since(seq),
+                                ),
+                                _ => (None, log.read_since(last_sent)),
                             }
                         };
-                        if let Some((snapshot_seq, blob)) = snapshot {
-                            if !wants_compact {
+                        if let Some((snapshot_seq, parts)) = snapshot {
+                            if !wants_compact || (parts > 1 && !wants_compact2) {
                                 let _ = send(&mut socket, &ServerMsg::Err {
                                     code: "compacted".into(),
                                     msg: "log compacted past your cursor; upgrade this client".into(),
                                 }).await;
                                 return;
                             }
-                            if !send(&mut socket, &ServerMsg::Snapshot {
-                                upto_seq: snapshot_seq,
-                                blob: b64_encode(&blob),
-                            }).await {
+                            if !send_snapshot(&mut socket, &hub, snapshot_seq, parts).await {
                                 return;
                             }
                             last_sent = snapshot_seq;
@@ -582,6 +710,22 @@ mod tests {
         serde_json::json!({ "t": "compact", "upto_seq": upto_seq, "blob": STANDARD.encode(blob) })
     }
 
+    fn hello_compact2(vault_id: &str, token: &str, since_seq: u64) -> serde_json::Value {
+        serde_json::json!({
+            "t": "hello", "vault_id": vault_id, "token": token,
+            "since_seq": since_seq, "caps": ["presence", "compact", "compact2"],
+        })
+    }
+
+    fn compact_part_frame(upto_seq: u64, idx: u32, of: u32, blob: &[u8]) -> serde_json::Value {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        serde_json::json!({
+            "t": "compact_part", "upto_seq": upto_seq, "idx": idx, "of": of,
+            "blob": STANDARD.encode(blob),
+        })
+    }
+
     /// Push 3 blobs and compact up to seq 2; returns (url, data_dir, vault).
     async fn compacted_vault(tag: &str) -> (String, PathBuf, String) {
         let data = temp_dir(tag);
@@ -614,6 +758,7 @@ mod tests {
         let caps = welcome["caps"].as_array().unwrap();
         assert!(caps.iter().any(|c| c == "presence"));
         assert!(caps.iter().any(|c| c == "compact"));
+        assert!(caps.iter().any(|c| c == "compact2"));
         assert_eq!(welcome["log_bytes"], 0, "empty vault, empty log");
 
         send_json(&mut writer, push(b"some-blob")).await;
@@ -702,6 +847,180 @@ mod tests {
         // …but the connection survives and keeps accepting pushes.
         send_json(&mut ws, push(b"still-alive")).await;
         assert_eq!(recv_json(&mut ws).await["t"], "ack");
+    }
+
+    // ---- chunked compaction (collab-m5)
+
+    /// Push 3 blobs and chunk-compact up to seq 2 in two parts.
+    async fn chunked_vault(tag: &str) -> (String, PathBuf, String) {
+        let data = temp_dir(tag);
+        let url = spawn_relay(data.clone()).await;
+        let vault = "f".repeat(32);
+
+        let mut writer = connect(&url).await;
+        send_json(&mut writer, hello_compact2(&vault, "tok", 0)).await;
+        recv_json(&mut writer).await; // welcome
+        for blob in [b"one".as_slice(), b"two", b"three"] {
+            send_json(&mut writer, push(blob)).await;
+            recv_json(&mut writer).await; // ack
+            recv_json(&mut writer).await; // own echo
+        }
+        send_json(&mut writer, compact_part_frame(2, 0, 2, b"part-zero")).await;
+        send_json(&mut writer, compact_part_frame(2, 1, 2, b"part-one")).await;
+        let reply = recv_json(&mut writer).await;
+        assert_eq!(reply["t"], "compacted");
+        assert_eq!(reply["upto_seq"], 2);
+        (url, data, vault)
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_commits_on_last_part_and_serves_parts_to_compact2() {
+        let (url, data, vault) = chunked_vault("chunk-commit").await;
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+
+        // A compact2 joiner below the snapshot gets the parts in order,
+        // then the tail.
+        let mut joiner = connect(&url).await;
+        send_json(&mut joiner, hello_compact2(&vault, "tok", 0)).await;
+        let welcome = recv_json(&mut joiner).await;
+        assert_eq!(welcome["latest_seq"], 3);
+        for (idx, expected) in [(0, b"part-zero".as_slice()), (1, b"part-one")] {
+            let part = recv_json(&mut joiner).await;
+            assert_eq!(part["t"], "snapshot_part");
+            assert_eq!(part["upto_seq"], 2);
+            assert_eq!(part["idx"], idx);
+            assert_eq!(part["of"], 2);
+            assert_eq!(
+                STANDARD.decode(part["blob"].as_str().unwrap()).unwrap(),
+                expected
+            );
+        }
+        let tail = recv_json(&mut joiner).await;
+        assert_eq!(tail["t"], "update");
+        assert_eq!(tail["seq"], 3);
+
+        // v2 layout on disk, prefix truly gone from the log.
+        let vdir = data.join(&vault);
+        let raw = std::fs::read_to_string(vdir.join("snapshot.json")).unwrap();
+        assert!(raw.contains("\"parts\":2"));
+        assert!(vdir.join("snapshot.parts.2").join("1").is_file());
+        let raw = std::fs::read_to_string(vdir.join("log.jsonl")).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_out_of_order_discards_and_errs_but_connection_survives() {
+        let url = spawn_relay(temp_dir("chunk-order")).await;
+        let vault = "f".repeat(32);
+
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_compact2(&vault, "tok", 0)).await;
+        recv_json(&mut ws).await; // welcome
+        for blob in [b"one".as_slice(), b"two"] {
+            send_json(&mut ws, push(blob)).await;
+            recv_json(&mut ws).await; // ack
+            recv_json(&mut ws).await; // echo
+        }
+
+        // First part must be idx 0…
+        send_json(&mut ws, compact_part_frame(2, 1, 2, b"part-one")).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "compact_part_order");
+
+        // …a mid-offer mismatch discards the staging…
+        send_json(&mut ws, compact_part_frame(2, 0, 2, b"part-zero")).await;
+        send_json(&mut ws, compact_part_frame(2, 0, 3, b"regressed")).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["code"], "compact_part_order");
+
+        // …the connection survives, and a clean retry commits.
+        send_json(&mut ws, push(b"still-alive")).await;
+        assert_eq!(recv_json(&mut ws).await["t"], "ack");
+        recv_json(&mut ws).await; // echo
+        send_json(&mut ws, compact_part_frame(3, 0, 2, b"p0")).await;
+        send_json(&mut ws, compact_part_frame(3, 1, 2, b"p1")).await;
+        let reply = recv_json(&mut ws).await;
+        assert_eq!(reply["t"], "compacted");
+        assert_eq!(reply["upto_seq"], 3);
+    }
+
+    #[tokio::test]
+    async fn multi_part_snapshot_below_cursor_is_err_compacted_for_compact_only_client() {
+        let (url, _data, vault) = chunked_vault("chunk-oldcap").await;
+
+        // A 0.22-style client (compact, no compact2) below a multi-part
+        // snapshot gets the same honest fatal a 0.21 client gets below any
+        // snapshot: err compacted, upgrade.
+        let mut old = connect(&url).await;
+        send_json(&mut old, hello_compact(&vault, "tok", 0)).await;
+        let err = recv_json(&mut old).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "compacted");
+
+        // At or past the snapshot the same client works untouched.
+        let mut caught = connect(&url).await;
+        send_json(&mut caught, hello_compact(&vault, "tok", 2)).await;
+        recv_json(&mut caught).await; // welcome
+        assert_eq!(recv_json(&mut caught).await["seq"], 3);
+    }
+
+    #[tokio::test]
+    async fn single_part_snapshot_still_served_as_legacy_snapshot_to_compact2() {
+        // Compat guard: chunking must not change how snapshots that fit one
+        // frame are served — 0.22 clients keep working below them.
+        let (url, _data, vault) = compacted_vault("chunk-legacy").await;
+
+        let mut joiner = connect(&url).await;
+        send_json(&mut joiner, hello_compact2(&vault, "tok", 0)).await;
+        recv_json(&mut joiner).await; // welcome
+        let snap = recv_json(&mut joiner).await;
+        assert_eq!(snap["t"], "snapshot", "one part → the legacy frame");
+        assert_eq!(snap["upto_seq"], 2);
+        assert_eq!(recv_json(&mut joiner).await["seq"], 3);
+    }
+
+    #[tokio::test]
+    async fn disconnect_mid_upload_discards_staging() {
+        let data = temp_dir("chunk-drop");
+        let url = spawn_relay(data.clone()).await;
+        let vault = "f".repeat(32);
+
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_compact2(&vault, "tok", 0)).await;
+        recv_json(&mut ws).await; // welcome
+        send_json(&mut ws, push(b"one")).await;
+        recv_json(&mut ws).await; // ack
+        recv_json(&mut ws).await; // echo
+
+        send_json(&mut ws, compact_part_frame(1, 0, 2, b"part-zero")).await;
+        // Half an offer, then the connection dies.
+        drop(ws);
+
+        let vdir = data.join(&vault);
+        wait_until("staging dir cleaned up after disconnect", || {
+            !std::fs::read_dir(&vdir).is_ok_and(|entries| {
+                entries.flatten().any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("snapshot.staging.")
+                })
+            })
+        })
+        .await;
+        assert!(
+            !vdir.join("snapshot.json").exists(),
+            "nothing was committed"
+        );
+
+        // A fresh, complete upload succeeds afterwards.
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_compact2(&vault, "tok", 1)).await;
+        recv_json(&mut ws).await; // welcome
+        send_json(&mut ws, compact_part_frame(1, 0, 2, b"p0")).await;
+        send_json(&mut ws, compact_part_frame(1, 1, 2, b"p1")).await;
+        assert_eq!(recv_json(&mut ws).await["t"], "compacted");
     }
 
     #[tokio::test]
@@ -1888,6 +2207,146 @@ mod tests {
             .try_iter()
             .any(|e| matches!(e, LiveEvent::Compacted { .. }));
         assert!(compacted, "the session surfaced the Compacted event");
+    }
+
+    // ---- chunked compaction E2E (collab-m5) ----------------------------
+
+    #[tokio::test]
+    async fn live_session_chunks_snapshot_and_fresh_device_converges_from_parts() {
+        use tacitus_sync::client;
+        let data = temp_dir("chunklive-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("chunklive-va");
+        let vc = temp_dir("chunklive-vc");
+        let code = LiveCode::generate();
+
+        // Seed several docs so a tiny part budget forces a multi-part offer.
+        let (vault_id, token) = {
+            let mut a = LiveEngine::open(&va, &code).unwrap();
+            std::fs::write(va.join("one.md"), "first\n").unwrap();
+            std::fs::write(va.join("two.md"), "second\n").unwrap();
+            client::run_once(&mut a, &url).await.unwrap();
+            std::fs::write(va.join("three.md"), "third\n").unwrap();
+            client::run_once(&mut a, &url).await.unwrap();
+            let tacitus_sync::ClientMsg::Hello {
+                vault_id, token, ..
+            } = a.hello()
+            else {
+                panic!("hello is hello");
+            };
+            (vault_id, token)
+        };
+        let vdir = data.join(&vault_id);
+        let before = std::fs::read_to_string(vdir.join("log.jsonl"))
+            .unwrap()
+            .lines()
+            .count();
+
+        let a = spawn_live(&va, &code, &url, |c| {
+            c.compact_threshold = 1;
+            c.snapshot_part_budget = 64;
+        });
+        wait_until("v2 snapshot (parts dir) lands on the relay", || {
+            std::fs::read_dir(&vdir).is_ok_and(|entries| {
+                entries.flatten().any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("snapshot.parts.")
+                })
+            })
+        })
+        .await;
+        wait_until("log tail truncated on disk", || {
+            std::fs::read_to_string(vdir.join("log.jsonl"))
+                .map(|raw| raw.lines().count() < before)
+                .unwrap_or(false)
+        })
+        .await;
+
+        // A fresh device converges from the parts + tail alone, through the
+        // real client download path.
+        let mut c = LiveEngine::open(&vc, &code).unwrap();
+        client::run_once(&mut c, &url).await.unwrap();
+        assert_eq!(c.materialize("n:one").unwrap().as_deref(), Some("first\n"));
+        assert_eq!(c.materialize("n:two").unwrap().as_deref(), Some("second\n"));
+        assert_eq!(
+            c.materialize("n:three").unwrap().as_deref(),
+            Some("third\n")
+        );
+
+        // A 0.22-style client (compact, no compact2) below the multi-part
+        // snapshot gets the honest fatal instead of frames it can't use.
+        let mut old = connect(&url).await;
+        send_json(&mut old, hello_compact(&vault_id, &token, 0)).await;
+        let err = recv_json(&mut old).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "compacted");
+
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+        let compacted = a
+            .events
+            .try_iter()
+            .any(|e| matches!(e, LiveEvent::Compacted { .. }));
+        assert!(compacted, "the session surfaced the Compacted event");
+    }
+
+    #[tokio::test]
+    async fn concurrent_live_sessions_survive_compaction_race_and_stay_synced() {
+        use tacitus_sync::client;
+        let data = temp_dir("race-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("race-va");
+        let vb = temp_dir("race-vb");
+        let code = LiveCode::generate();
+
+        // A fat backlog so both sessions are still catching up when they
+        // connect — their offers then land close together and one loses.
+        // (The losing order is a legal race; every assertion below holds
+        // whichever session wins, or even if only one ends up offering.)
+        let vault_id = {
+            let mut a = LiveEngine::open(&va, &code).unwrap();
+            for i in 0..20 {
+                std::fs::write(va.join(format!("n{i}.md")), format!("note {i}\n")).unwrap();
+                if i % 5 == 0 {
+                    client::run_once(&mut a, &url).await.unwrap();
+                }
+            }
+            client::run_once(&mut a, &url).await.unwrap();
+            let mut b = LiveEngine::open(&vb, &code).unwrap();
+            client::run_once(&mut b, &url).await.unwrap();
+            a.vault_id().to_string()
+        };
+
+        let a = spawn_live(&va, &code, &url, |c| c.compact_threshold = 1);
+        let b = spawn_live(&vb, &code, &url, |c| c.compact_threshold = 1);
+        wait_until("one offer wins and the snapshot lands", || {
+            data.join(&vault_id).join("snapshot.json").exists()
+        })
+        .await;
+
+        // Both sessions must have survived the race: an edit still flows
+        // A → B through both live loops.
+        std::fs::write(va.join("after.md"), "post-compaction\n").unwrap();
+        a.nudge.send(LiveCmd::Nudge).await.unwrap();
+        wait_until("the loser's session still applies updates", || {
+            std::fs::read_to_string(vb.join("after.md"))
+                .map(|s| s == "post-compaction\n")
+                .unwrap_or(false)
+        })
+        .await;
+
+        drop(a.nudge);
+        drop(b.nudge);
+        a.task.await.unwrap().unwrap();
+        b.task.await.unwrap().unwrap();
+        let compacted = a
+            .events
+            .try_iter()
+            .chain(b.events.try_iter())
+            .filter(|e| matches!(e, LiveEvent::Compacted { .. }))
+            .count();
+        assert_eq!(compacted, 1, "exactly one offer commits");
     }
 
     // ---- durable mirror + witness (collab-m4) --------------------------
