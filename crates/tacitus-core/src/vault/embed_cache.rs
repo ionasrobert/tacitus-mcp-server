@@ -94,13 +94,9 @@ mod tests {
     use super::*;
     use crate::vault::embed::HashingEmbedder;
     use std::cell::Cell;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_cache(tag: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = crate::test_unique_suffix();
         let mut dir = std::env::temp_dir();
         dir.push(format!("tacitus-vec-{tag}-{nanos}"));
         dir.join(".tacitus").join("vectors").join("hash.json")

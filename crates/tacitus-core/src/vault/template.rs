@@ -137,13 +137,9 @@ impl TemplateStore {
 mod tests {
     use super::*;
     use crate::vault::parse_note;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_vault() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = crate::test_unique_suffix();
         let mut dir = std::env::temp_dir();
         dir.push(format!("tacitus-tpl-{nanos}"));
         fs::create_dir_all(dir.join(".tacitus").join("templates")).unwrap();

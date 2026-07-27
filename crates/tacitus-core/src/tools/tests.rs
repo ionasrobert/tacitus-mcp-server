@@ -6,17 +6,13 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 use super::*;
 
 fn temp_vault(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let nanos = crate::test_unique_suffix();
     let dir = std::env::temp_dir().join(format!("tacitus-tools-{tag}-{nanos}"));
     fs::create_dir_all(dir.join("notes")).unwrap();
     fs::write(

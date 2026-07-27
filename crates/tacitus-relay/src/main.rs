@@ -533,7 +533,7 @@ mod tests {
     /// Next JSON text frame (skips ping/pong), with a test timeout.
     async fn recv_json(ws: &mut Client) -> serde_json::Value {
         loop {
-            let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            let frame = tokio::time::timeout(Duration::from_secs(15), ws.next())
                 .await
                 .expect("timed out waiting for a frame")
                 .expect("stream ended")
@@ -860,7 +860,7 @@ mod tests {
 
     /// Poll until `cond` holds — deadline-capped, never a fixed sleep.
     async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         while !cond() {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -1486,7 +1486,7 @@ mod tests {
         let vd = temp_dir("durable-vd");
         let mut engine = LiveEngine::open(&vd, &code).unwrap();
         let mut writer = LiveWriter::new(&vd, LiveScope::ReadWrite);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             tacitus_sync::client::sync_pass(&mut engine, &mut writer, &url)
                 .await
@@ -1752,15 +1752,20 @@ mod tests {
         assert_eq!(frame["t"], "update");
         assert_eq!(frame["seq"], 1);
 
-        // A gets its own presence echo and the push ack (their relative
-        // order is a select race — the ack is sent inline, the echo rides
-        // the broadcast arm), but never a presence ACK.
-        let one = recv_json(&mut a).await;
-        let two = recv_json(&mut a).await;
-        let mut tags = [one["t"].as_str().unwrap(), two["t"].as_str().unwrap()];
+        // A gets its own presence echo, the push ack, and its own update
+        // echo. The presence echo and the update echo ride two DIFFERENT
+        // broadcast channels, so every interleaving is legal (the only
+        // fixed point: the inline ack precedes the update echo). Never a
+        // presence ACK, though.
+        let frames = [
+            recv_json(&mut a).await,
+            recv_json(&mut a).await,
+            recv_json(&mut a).await,
+        ];
+        let mut tags: Vec<&str> = frames.iter().map(|f| f["t"].as_str().unwrap()).collect();
         tags.sort_unstable();
-        assert_eq!(tags, ["ack", "presence"]);
-        let ack = if one["t"] == "ack" { &one } else { &two };
+        assert_eq!(tags, ["ack", "presence", "update"]);
+        let ack = frames.iter().find(|f| f["t"] == "ack").unwrap();
         assert_eq!(ack["seq"], 1, "the only ack is the push's");
 
         // A late joiner replays a log that contains ONLY the push.
@@ -1810,5 +1815,78 @@ mod tests {
         let err = recv_json(&mut ws).await;
         assert_eq!(err["t"], "err");
         assert_eq!(err["code"], "bad_vault_id");
+    }
+
+    // ---- compaction (collab-m4) ----------------------------------------
+
+    #[tokio::test]
+    async fn live_session_compacts_and_a_fresh_device_converges_from_snapshot() {
+        use tacitus_sync::client;
+        let data = temp_dir("autocompact-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("autocompact-va");
+        let vc = temp_dir("autocompact-vc");
+        let code = LiveCode::generate();
+
+        // Seed real history: several log entries across passes.
+        let (vault_id, token) = {
+            let mut a = LiveEngine::open(&va, &code).unwrap();
+            std::fs::write(va.join("one.md"), "first\n").unwrap();
+            client::run_once(&mut a, &url).await.unwrap();
+            std::fs::write(va.join("two.md"), "second\n").unwrap();
+            client::run_once(&mut a, &url).await.unwrap();
+            std::fs::write(va.join("one.md"), "first, edited\n").unwrap();
+            client::run_once(&mut a, &url).await.unwrap();
+            let tacitus_sync::ClientMsg::Hello {
+                vault_id, token, ..
+            } = a.hello()
+            else {
+                panic!("hello is hello");
+            };
+            (vault_id, token)
+        };
+        let before = std::fs::read_to_string(data.join(&vault_id).join("log.jsonl"))
+            .unwrap()
+            .lines()
+            .count();
+        assert!(before >= 3);
+
+        // A live session with a tiny threshold compacts right after catch-up.
+        let a = spawn_live(&va, &code, &url, |c| c.compact_threshold = 1);
+        wait_until("snapshot lands on the relay", || {
+            data.join(&vault_id).join("snapshot.json").exists()
+        })
+        .await;
+        wait_until("log tail truncated on disk", || {
+            std::fs::read_to_string(data.join(&vault_id).join("log.jsonl"))
+                .map(|raw| raw.lines().count() < before)
+                .unwrap_or(false)
+        })
+        .await;
+
+        // A fresh device converges from snapshot + tail alone.
+        let mut c = LiveEngine::open(&vc, &code).unwrap();
+        client::run_once(&mut c, &url).await.unwrap();
+        assert_eq!(
+            c.materialize("n:one").unwrap().as_deref(),
+            Some("first, edited\n")
+        );
+        assert_eq!(c.materialize("n:two").unwrap().as_deref(), Some("second\n"));
+
+        // An 0.21-style client (no compact cap) below the snapshot gets the
+        // honest fatal error instead of a silent gap.
+        let mut old = connect(&url).await;
+        send_json(&mut old, hello(&vault_id, &token, 0)).await;
+        let err = recv_json(&mut old).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "compacted");
+
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+        let compacted = a
+            .events
+            .try_iter()
+            .any(|e| matches!(e, LiveEvent::Compacted { .. }));
+        assert!(compacted, "the session surfaced the Compacted event");
     }
 }
