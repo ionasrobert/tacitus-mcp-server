@@ -10,7 +10,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-/// Backstop even with compaction: a vault log stops growing at 512 MB.
+/// The default per-vault quota when no entitlement says otherwise: a vault
+/// log stops growing at 512 MB — the pre-quota backstop, unchanged for
+/// self-hosters.
 pub const LOG_CAP_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The biggest single snapshot blob the relay accepts — the whole snapshot
@@ -18,11 +20,6 @@ pub const LOG_CAP_BYTES: u64 = 512 * 1024 * 1024;
 /// keeps the 64 MiB WS frames comfortable: b64(32 MiB) ≈ 43 MiB). A single
 /// sealed doc state beyond this still can't ship — see SYNC.md caveats.
 pub const SNAPSHOT_MAX: usize = 32 * 1024 * 1024;
-
-/// Total across all parts of a chunked snapshot: a snapshot can never
-/// legitimately outgrow the log it replaces. Parts are staged and served
-/// from disk, so this is a disk bound, not a RAM bound.
-pub const SNAPSHOT_TOTAL_MAX: u64 = LOG_CAP_BYTES;
 
 #[derive(Serialize, Deserialize)]
 struct LogLine {
@@ -77,12 +74,14 @@ fn now_secs() -> u64 {
 static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Structured refusal for a part that busts a cap (None = fits). Pure so
-/// the 512 MiB total bound is testable without fixtures.
-fn part_cap_violation(total_so_far: u64, part_len: usize) -> Option<&'static str> {
+/// the total bound is testable without fixtures. `total_cap` is the vault's
+/// quota: a snapshot can never legitimately outgrow the log it replaces.
+/// Parts are staged and served from disk, so it is a disk bound, not RAM.
+fn part_cap_violation(total_so_far: u64, part_len: usize, total_cap: u64) -> Option<&'static str> {
     if part_len > SNAPSHOT_MAX {
         return Some("compact_part_too_large");
     }
-    if total_so_far + part_len as u64 > SNAPSHOT_TOTAL_MAX {
+    if total_so_far + part_len as u64 > total_cap {
         return Some("compact_too_large");
     }
     None
@@ -99,6 +98,10 @@ pub struct PartStaging {
     of: u32,
     next_idx: u32,
     total_bytes: u64,
+    /// The vault's quota at staging time. Fixed for the upload's lifetime —
+    /// an entitlement downgrade mid-upload lets one snapshot bounded by the
+    /// old quota commit; every later operation enforces the new one.
+    total_cap: u64,
 }
 
 impl PartStaging {
@@ -118,7 +121,7 @@ impl PartStaging {
         if self.next_idx >= self.of {
             return Err(io::Error::other("compact_part_order"));
         }
-        if let Some(code) = part_cap_violation(self.total_bytes, blob.len()) {
+        if let Some(code) = part_cap_violation(self.total_bytes, blob.len(), self.total_cap) {
             return Err(io::Error::other(code));
         }
         let path = self.dir.join(self.next_idx.to_string());
@@ -295,12 +298,28 @@ impl VaultLog {
         self.rewrite_tail(upto_seq)
     }
 
+    /// Test-only convenience: `compact_within` at the default quota.
+    #[cfg(test)]
+    pub fn compact(&mut self, upto_seq: u64, blob: &[u8]) -> io::Result<()> {
+        self.compact_within(upto_seq, blob, LOG_CAP_BYTES)
+    }
+
     /// Accept a compaction snapshot covering the log up to `upto_seq`:
     /// persist it, then drop every entry at or below it (seqs never
     /// renumber). The old log is kept one generation as log.prev.jsonl.
-    pub fn compact(&mut self, upto_seq: u64, blob: &[u8]) -> io::Result<()> {
+    /// Deliberately NOT gated on the log being under quota — compaction is
+    /// the cure for an over-quota vault; only the snapshot itself must fit.
+    pub fn compact_within(
+        &mut self,
+        upto_seq: u64,
+        blob: &[u8],
+        quota_bytes: u64,
+    ) -> io::Result<()> {
         if blob.len() > SNAPSHOT_MAX {
             return Err(io::Error::other("snapshot_too_large"));
+        }
+        if blob.len() as u64 > quota_bytes {
+            return Err(io::Error::other("compact_too_large"));
         }
         self.check_compactable(upto_seq)?;
 
@@ -321,10 +340,22 @@ impl VaultLog {
         )
     }
 
-    /// Start staging a chunked upload. Fail-fast on offers that could never
-    /// commit; the definitive stale check re-runs at commit (another
-    /// connection may win the race meanwhile).
+    /// Test-only convenience: `stage_parts_within` at the default quota.
+    #[cfg(test)]
     pub fn stage_parts(&self, upto_seq: u64, of: u32) -> io::Result<PartStaging> {
+        self.stage_parts_within(upto_seq, of, LOG_CAP_BYTES)
+    }
+
+    /// Start staging a chunked upload; `quota_bytes` bounds the total across
+    /// parts and is fixed for this upload's lifetime. Fail-fast on offers
+    /// that could never commit; the definitive stale check re-runs at commit
+    /// (another connection may win the race meanwhile).
+    pub fn stage_parts_within(
+        &self,
+        upto_seq: u64,
+        of: u32,
+        quota_bytes: u64,
+    ) -> io::Result<PartStaging> {
         if of == 0 {
             return Err(io::Error::other("compact_part_order"));
         }
@@ -342,6 +373,7 @@ impl VaultLog {
             of,
             next_idx: 0,
             total_bytes: 0,
+            total_cap: quota_bytes,
         })
     }
 
@@ -356,7 +388,7 @@ impl VaultLog {
         }
         if staging.of == 1 {
             let blob = fs::read(staging.dir.join("0"))?;
-            return self.compact(staging.upto_seq, &blob);
+            return self.compact_within(staging.upto_seq, &blob, staging.total_cap);
         }
         self.check_compactable(staging.upto_seq)?;
 
@@ -430,12 +462,19 @@ impl VaultLog {
         fs::rename(&tmp, &self.log_path)
     }
 
-    /// Append a blob; returns its assigned seq. Fsynced — an acked update
-    /// survives a relay crash.
+    /// Test-only convenience: `append_within` at the default quota.
+    #[cfg(test)]
     pub fn append(&mut self, blob: &[u8]) -> io::Result<u64> {
+        self.append_within(blob, LOG_CAP_BYTES)
+    }
+
+    /// Append a blob under the vault's quota; returns its assigned seq.
+    /// Fsynced — an acked update survives a relay crash. The refusal string
+    /// is internal; main.rs picks the wire code by the client's caps.
+    pub fn append_within(&mut self, blob: &[u8], quota_bytes: u64) -> io::Result<u64> {
         if let Ok(meta) = fs::metadata(&self.log_path) {
-            if meta.len() >= LOG_CAP_BYTES {
-                return Err(io::Error::other("log_full"));
+            if meta.len() >= quota_bytes {
+                return Err(io::Error::other("quota_exceeded"));
             }
         }
         let seq = self.last_seq + 1;
@@ -787,16 +826,13 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("compact_part_order"));
-        // The caps are pure checks — the 512 MiB total needs no fixture.
+        // The caps are pure checks — the total bound needs no fixture.
         assert_eq!(
-            part_cap_violation(0, SNAPSHOT_MAX + 1),
+            part_cap_violation(0, SNAPSHOT_MAX + 1, u64::MAX),
             Some("compact_part_too_large")
         );
-        assert_eq!(
-            part_cap_violation(SNAPSHOT_TOTAL_MAX - 10, 11),
-            Some("compact_too_large")
-        );
-        assert_eq!(part_cap_violation(SNAPSHOT_TOTAL_MAX - 10, 10), None);
+        assert_eq!(part_cap_violation(90, 11, 100), Some("compact_too_large"));
+        assert_eq!(part_cap_violation(90, 10, 100), None);
         // The valid snapshot is untouched by every rejection.
         assert_eq!(log.snapshot_seq(), Some(3));
         assert_eq!(log.snapshot_parts(), 2);
@@ -888,6 +924,62 @@ mod tests {
         let log = VaultLog::open(&dir, &vid).unwrap();
         assert_eq!(log.snapshot_seq(), None);
         assert_eq!(log.snapshot_parts(), 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_within_refuses_at_quota_and_compaction_still_shrinks() {
+        let dir = temp_dir("quota-append");
+        let mut log = VaultLog::open(&dir, &"m".repeat(32)).unwrap();
+        // First append lands (0 < quota); the log line it writes (~50 bytes
+        // of JSON) puts the file over a 32-byte quota, so the second refuses.
+        assert_eq!(log.append_within(b"one", 32).unwrap(), 1);
+        let err = log.append_within(b"two", 32).unwrap_err();
+        assert!(err.to_string().contains("quota_exceeded"), "{err}");
+
+        // Compaction is the cure: allowed even while over quota, as long as
+        // the snapshot itself fits.
+        log.compact_within(1, b"snap", 32).unwrap();
+        assert_eq!(log.snapshot_seq(), Some(1));
+        // The truncated log is under quota again; seqs stay continuous.
+        assert_eq!(log.append_within(b"two", 32).unwrap(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compact_within_refuses_snapshot_beyond_quota() {
+        let dir = temp_dir("quota-compact");
+        let mut log = VaultLog::open(&dir, &"n".repeat(32)).unwrap();
+        log.append(b"one").unwrap();
+
+        let big = vec![0u8; 64];
+        let err = log.compact_within(1, &big, 32).unwrap_err();
+        assert!(err.to_string().contains("compact_too_large"), "{err}");
+        // The refusal touched nothing.
+        assert_eq!(log.snapshot_seq(), None);
+        assert_eq!(log.read_since(0).unwrap().len(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_parts_within_enforces_quota_total_across_parts() {
+        let dir = temp_dir("quota-parts");
+        let vid = "o".repeat(32);
+        let mut log = VaultLog::open(&dir, &vid).unwrap();
+        for i in 1..=3u8 {
+            log.append(&[i]).unwrap();
+        }
+        commit_chunked(&mut log, 1, &[b"base"]).unwrap();
+
+        // 10 + 10 busts a 16-byte quota on the second part.
+        let mut staging = log.stage_parts_within(3, 2, 16).unwrap();
+        staging.add(b"0123456789").unwrap();
+        let err = staging.add(b"0123456789").unwrap_err();
+        assert!(err.to_string().contains("compact_too_large"), "{err}");
+        drop(staging);
+        // The committed snapshot is untouched by the refusal.
+        assert_eq!(log.snapshot_seq(), Some(1));
+        assert_eq!(log.snapshot_part(0).unwrap(), b"base");
         fs::remove_dir_all(&dir).ok();
     }
 }

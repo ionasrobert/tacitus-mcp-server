@@ -7,8 +7,12 @@
 //! connections (pusher included). It never sees plaintext: blobs are
 //! end-to-end encrypted by the clients.
 //!
-//!   TACITUS_RELAY_BIND  (default 127.0.0.1:8091)
-//!   TACITUS_RELAY_DATA  (default ./relay-data)
+//!   TACITUS_RELAY_BIND           (default 127.0.0.1:8091)
+//!   TACITUS_RELAY_DATA           (default ./relay-data)
+//!   TACITUS_RELAY_QUOTA_DEFAULT  (bytes; default 512 MiB) — per-vault quota
+//!                                for vaults with no entitlement
+//!   TACITUS_RELAY_ENTITLEMENTS   (default <data>/entitlements.json) —
+//!                                per-vault quota overrides, hot-reloaded
 
 mod hub;
 mod log;
@@ -24,7 +28,7 @@ use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
 
-use hub::{valid_vault_id, RelayState, VaultHub};
+use hub::{valid_vault_id, RelayConfig, RelayState, VaultHub};
 
 // The wire protocol, mirrored from tacitus-sync/src/protocol.rs (the relay
 // deliberately does not depend on the sync crate — it must never be able to
@@ -34,7 +38,9 @@ use hub::{valid_vault_id, RelayState, VaultHub};
 /// an old client can never receive a tag it can't parse. A client below a
 /// compaction snapshot WITHOUT the compact cap is rejected honestly
 /// (`err compacted`) instead of silently missing the compacted prefix.
-const RELAY_CAPS: [&str; 3] = ["presence", "compact", "compact2"];
+/// "quota" gates only the `quota_exceeded` err code — clients without it
+/// get the legacy `log_full` (an unknown err code is fatal to old clients).
+const RELAY_CAPS: [&str; 4] = ["presence", "compact", "compact2", "quota"];
 
 /// Presence blobs are ephemeral (never logged) so the log cap doesn't bound
 /// them — this does. Real payloads are ~300 bytes.
@@ -77,6 +83,10 @@ enum ServerMsg {
         latest_seq: u64,
         caps: Vec<String>,
         log_bytes: u64,
+        /// The vault's effective quota — always the enforced number, whether
+        /// it comes from an entitlement or the default. (Clients read 0 as
+        /// "relay predates quotas"; a real quota is never 0.)
+        quota_bytes: u64,
     },
     Update {
         seq: u64,
@@ -257,6 +267,7 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
     let wants_presence = caps.iter().any(|c| c == "presence");
     let wants_compact = caps.iter().any(|c| c == "compact");
     let wants_compact2 = caps.iter().any(|c| c == "compact2");
+    let wants_quota = caps.iter().any(|c| c == "quota");
 
     if !valid_vault_id(&vault_id) {
         return reject(
@@ -287,6 +298,8 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
     // capability gate: unsubscribed connections can never receive the tag.
     let mut rx = hub.tx.subscribe();
     let mut presence_rx = wants_presence.then(|| hub.presence.subscribe());
+    // Quota is sampled before the log lock, never under it.
+    let quota_bytes = state.quota_for(&vault_id);
     let (latest_seq, log_bytes, snapshot, backlog) = {
         let log = hub.log.lock().await;
         // A cursor below the snapshot replays snapshot-then-tail; everyone
@@ -329,6 +342,7 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
         latest_seq,
         caps: RELAY_CAPS.iter().map(|c| c.to_string()).collect(),
         log_bytes,
+        quota_bytes,
     };
     if !send(&mut socket, &welcome).await {
         return;
@@ -376,7 +390,11 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                                     }).await;
                                     continue;
                                 };
-                                let appended = hub.log.lock().await.append(&bytes);
+                                // Sampled per push (before the log lock) so
+                                // an entitlement upgrade unblocks a refused
+                                // vault without a reconnect.
+                                let quota = state.quota_for(&vault_id);
+                                let appended = hub.log.lock().await.append_within(&bytes, quota);
                                 match appended {
                                     Ok(seq) => {
                                         if !send(&mut socket, &ServerMsg::Ack { seq }).await {
@@ -384,10 +402,14 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                                         }
                                         let _ = hub.tx.send((seq, bytes));
                                     }
-                                    Err(e) if e.to_string().contains("log_full") => {
+                                    Err(e) if e.to_string().contains("quota_exceeded") => {
+                                        // Old clients treat any unknown err
+                                        // code as fatal — they keep getting
+                                        // the code they already know.
+                                        let code = if wants_quota { "quota_exceeded" } else { "log_full" };
                                         let _ = send(&mut socket, &ServerMsg::Err {
-                                            code: "log_full".into(),
-                                            msg: "vault log reached the beta cap".into(),
+                                            code: code.into(),
+                                            msg: format!("vault storage quota exceeded ({quota} bytes)"),
                                         }).await;
                                     }
                                     Err(e) => {
@@ -420,7 +442,9 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                                     }).await;
                                     continue;
                                 };
-                                let result = hub.log.lock().await.compact(upto_seq, &bytes);
+                                let quota = state.quota_for(&vault_id);
+                                let result =
+                                    hub.log.lock().await.compact_within(upto_seq, &bytes, quota);
                                 match result {
                                     Ok(()) => {
                                         if !send(&mut socket, &ServerMsg::Compacted { upto_seq }).await {
@@ -463,7 +487,8 @@ async fn connection(mut socket: WebSocket, state: Arc<RelayState>) {
                                     continue;
                                 }
                                 if staging.is_none() {
-                                    match hub.log.lock().await.stage_parts(upto_seq, of) {
+                                    let quota = state.quota_for(&vault_id);
+                                    match hub.log.lock().await.stage_parts_within(upto_seq, of, quota) {
                                         Ok(s) => staging = Some(s),
                                         Err(e) => {
                                             if !send_compact_refusal(&mut socket, &e).await {
@@ -600,7 +625,20 @@ async fn main() {
     tracing_subscriber::fmt().with_target(false).init();
     let bind = std::env::var("TACITUS_RELAY_BIND").unwrap_or_else(|_| "127.0.0.1:8091".into());
     let data = std::env::var("TACITUS_RELAY_DATA").unwrap_or_else(|_| "./relay-data".into());
-    let state = Arc::new(RelayState::new(PathBuf::from(&data)));
+    let mut config = RelayConfig::new(PathBuf::from(&data));
+    if let Ok(raw) = std::env::var("TACITUS_RELAY_QUOTA_DEFAULT") {
+        match raw.parse::<u64>() {
+            Ok(bytes) if bytes > 0 => config.default_quota_bytes = bytes,
+            _ => tracing::warn!(
+                "TACITUS_RELAY_QUOTA_DEFAULT={raw} is not a positive byte count; keeping {}",
+                config.default_quota_bytes
+            ),
+        }
+    }
+    if let Ok(path) = std::env::var("TACITUS_RELAY_ENTITLEMENTS") {
+        config.entitlements_path = PathBuf::from(path);
+    }
+    let state = Arc::new(RelayState::with_config(config));
 
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
@@ -634,7 +672,15 @@ mod tests {
     }
 
     async fn spawn_relay(data_dir: PathBuf) -> String {
-        let state = Arc::new(RelayState::new(data_dir));
+        spawn_relay_with(data_dir, |_| {}).await
+    }
+
+    /// Like `spawn_relay`, with a config tweak — quota tests inject byte-
+    /// scale quotas here (the `spawn_live` pattern, relay-side).
+    async fn spawn_relay_with(data_dir: PathBuf, tweak: impl FnOnce(&mut RelayConfig)) -> String {
+        let mut config = RelayConfig::new(data_dir);
+        tweak(&mut config);
+        let state = Arc::new(RelayState::with_config(config));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -723,6 +769,13 @@ mod tests {
         serde_json::json!({
             "t": "compact_part", "upto_seq": upto_seq, "idx": idx, "of": of,
             "blob": STANDARD.encode(blob),
+        })
+    }
+
+    fn hello_quota(vault_id: &str, token: &str, since_seq: u64) -> serde_json::Value {
+        serde_json::json!({
+            "t": "hello", "vault_id": vault_id, "token": token,
+            "since_seq": since_seq, "caps": ["presence", "compact", "compact2", "quota"],
         })
     }
 
@@ -847,6 +900,127 @@ mod tests {
         // …but the connection survives and keeps accepting pushes.
         send_json(&mut ws, push(b"still-alive")).await;
         assert_eq!(recv_json(&mut ws).await["t"], "ack");
+    }
+
+    // ---- per-vault quotas (mon-m1)
+    //
+    // Quotas in these tests are tens of bytes: one JSON log line (~40 bytes
+    // for a 3-byte blob) is enough to cross them — no MB fixtures.
+
+    #[tokio::test]
+    async fn welcome_advertises_quota_cap_and_effective_quota_bytes() {
+        let data = temp_dir("quota-welcome");
+        let url = spawn_relay_with(data.clone(), |c| c.default_quota_bytes = 140).await;
+        let vault = "a".repeat(32);
+
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello(&vault, "tok", 0)).await;
+        let welcome = recv_json(&mut ws).await;
+        assert!(welcome["caps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "quota"));
+        assert_eq!(
+            welcome["quota_bytes"], 140,
+            "the effective quota is sent even when it equals the default"
+        );
+
+        // An entitlement granted while the relay runs shows up on the next
+        // hello — the file is hot-reloaded, no restart.
+        std::fs::write(
+            data.join("entitlements.json"),
+            format!(r#"{{"version":1,"vaults":{{"{vault}":{{"quota_bytes":5000}}}}}}"#),
+        )
+        .unwrap();
+        let mut second = connect(&url).await;
+        send_json(&mut second, hello(&vault, "tok", 0)).await;
+        assert_eq!(recv_json(&mut second).await["quota_bytes"], 5000);
+    }
+
+    #[tokio::test]
+    async fn push_over_quota_errs_quota_exceeded_but_compaction_heals() {
+        let url = spawn_relay_with(temp_dir("quota-push"), |c| c.default_quota_bytes = 30).await;
+        let vault = "b".repeat(32);
+
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_quota(&vault, "tok", 0)).await;
+        recv_json(&mut ws).await; // welcome
+        send_json(&mut ws, push(b"one")).await;
+        assert_eq!(recv_json(&mut ws).await["t"], "ack");
+        recv_json(&mut ws).await; // own echo
+
+        // The first line put the log over 30 bytes — refused, no seq burned.
+        send_json(&mut ws, push(b"two")).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "quota_exceeded");
+
+        // Compaction is the cure: allowed while over quota…
+        send_json(&mut ws, compact_frame(1, b"snap")).await;
+        assert_eq!(recv_json(&mut ws).await["t"], "compacted");
+        // …and the truncated log accepts pushes again, seqs continuous.
+        send_json(&mut ws, push(b"two")).await;
+        let ack = recv_json(&mut ws).await;
+        assert_eq!(ack["t"], "ack");
+        assert_eq!(ack["seq"], 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_client_over_quota_still_gets_log_full() {
+        let url = spawn_relay_with(temp_dir("quota-legacy"), |c| c.default_quota_bytes = 30).await;
+        let vault = "c".repeat(32);
+
+        // No "quota" in the hello caps: an unknown err code is fatal to old
+        // clients, so they keep receiving the one they already know.
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_compact(&vault, "tok", 0)).await;
+        recv_json(&mut ws).await; // welcome
+        send_json(&mut ws, push(b"one")).await;
+        recv_json(&mut ws).await; // ack
+        recv_json(&mut ws).await; // echo
+        send_json(&mut ws, push(b"two")).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["t"], "err");
+        assert_eq!(err["code"], "log_full");
+        // Still advisory relay-side: the connection keeps working.
+        send_json(&mut ws, compact_frame(1, b"snap")).await;
+        assert_eq!(recv_json(&mut ws).await["t"], "compacted");
+    }
+
+    #[tokio::test]
+    async fn entitlements_raise_quota_per_vault() {
+        let data = temp_dir("quota-ent");
+        let entitled = "a1".repeat(16);
+        std::fs::write(
+            data.join("entitlements.json"),
+            format!(
+                r#"{{"version":1,"vaults":{{"{entitled}":{{"quota_bytes":10000,"tier":"pro"}}}}}}"#
+            ),
+        )
+        .unwrap();
+        let url = spawn_relay_with(data, |c| c.default_quota_bytes = 30).await;
+
+        // The entitled vault sails past the default…
+        let mut pro = connect(&url).await;
+        send_json(&mut pro, hello_quota(&entitled, "tok", 0)).await;
+        assert_eq!(recv_json(&mut pro).await["quota_bytes"], 10000);
+        for blob in [b"one".as_slice(), b"two"] {
+            send_json(&mut pro, push(blob)).await;
+            assert_eq!(recv_json(&mut pro).await["t"], "ack");
+            recv_json(&mut pro).await; // echo
+        }
+
+        // …while an unentitled one is refused at 30 bytes.
+        let free = "b2".repeat(16);
+        let mut ws = connect(&url).await;
+        send_json(&mut ws, hello_quota(&free, "tok", 0)).await;
+        recv_json(&mut ws).await; // welcome
+        send_json(&mut ws, push(b"one")).await;
+        recv_json(&mut ws).await; // ack
+        recv_json(&mut ws).await; // echo
+        send_json(&mut ws, push(b"two")).await;
+        assert_eq!(recv_json(&mut ws).await["code"], "quota_exceeded");
     }
 
     // ---- chunked compaction (collab-m5)
