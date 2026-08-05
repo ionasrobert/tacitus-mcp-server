@@ -64,11 +64,14 @@ impl Config {
             }
         }
         let mut missing = Vec::new();
-        let mut required = |name: &'static str| {
-            std::env::var(name).unwrap_or_else(|_| {
+        // Empty counts as missing: docker-compose interpolation turns an
+        // unset host var into "", which must not slip past the fail-fast.
+        let mut required = |name: &'static str| match std::env::var(name) {
+            Ok(value) if !value.is_empty() => value,
+            _ => {
                 missing.push(name);
                 String::new()
-            })
+            }
         };
         let config = Self {
             bind: std::env::var("TACITUS_BILLING_BIND").unwrap_or_else(|_| "127.0.0.1:8092".into()),

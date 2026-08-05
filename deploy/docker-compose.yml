@@ -1,0 +1,55 @@
+# Hosted sync.tacitus.md stack (mirror of production on h2).
+#
+#   cd deploy && docker compose up -d              # relay only
+#   docker compose --profile billing up -d         # + billing (needs .env)
+#
+# Secrets live in deploy/.env on the server (never committed, chmod 600):
+#   STRIPE_SECRET_KEY=sk_…
+#   STRIPE_WEBHOOK_SECRET=whsec_…
+#   STRIPE_PRICE_MONTHLY=price_…
+#   STRIPE_PRICE_YEARLY=price_…
+#
+# Data lives on the host at /var/lib/tacitus-relay. Both services run as
+# uid 999 (the dir's owner) so billing can create and rename
+# entitlements.json in the same directory the relay reads it from.
+name: tacitus
+
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: crates/tacitus-relay/Dockerfile
+    image: tacitus-relay
+    container_name: tacitus-relay
+    restart: unless-stopped
+    user: "999:999"
+    ports:
+      - "127.0.0.1:8091:8091"
+    environment:
+      # Free tier: 100 MB of encrypted log per vault; entitlements.json
+      # (written by billing) raises it per vault.
+      TACITUS_RELAY_QUOTA_DEFAULT: "${TACITUS_RELAY_QUOTA_DEFAULT:-104857600}"
+    volumes:
+      - /var/lib/tacitus-relay:/data
+
+  billing:
+    build:
+      context: ..
+      dockerfile: crates/tacitus-billing/Dockerfile
+    image: tacitus-billing
+    container_name: tacitus-billing
+    restart: unless-stopped
+    # Off by default: it fail-fasts (loudly, by design) until .env carries
+    # the four STRIPE_* secrets — start it with --profile billing then.
+    profiles: ["billing"]
+    user: "999:999"
+    ports:
+      - "127.0.0.1:8092:8092"
+    environment:
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRICE_MONTHLY: "${STRIPE_PRICE_MONTHLY:-}"
+      STRIPE_PRICE_YEARLY: "${STRIPE_PRICE_YEARLY:-}"
+      TACITUS_BILLING_PRO_QUOTA: "${TACITUS_BILLING_PRO_QUOTA:-1073741824}"
+    volumes:
+      - /var/lib/tacitus-relay:/data
