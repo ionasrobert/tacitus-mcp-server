@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tacitus — long-term memory for AI agents</title>
+<meta name="description" content="Tacitus turns any folder of Markdown into an agent-native knowledge base: memory with provenance, retrieval under token budgets, revertible write-back, and E2E-encrypted sync. MIT, local-first.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --paper: #FBFAF7;
+    --ink: #1B201D;
+    --graphite: #626A66;
+    --mist: #E8E4DA;
+    --panel: #FFFFFF;
+    --patina: #2F7A68;
+    --patina-deep: #1E5548;
+    --patina-wash: #EDF4F1;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --serif: Charter, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #131816;
+      --ink: #E9E7DF;
+      --graphite: #9AA39E;
+      --mist: #28312D;
+      --panel: #1A211E;
+      --patina: #5FB39E;
+      --patina-deep: #8ACDBB;
+      --patina-wash: #1C2723;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.65;
+  }
+  a { color: var(--patina); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { color: var(--patina-deep); }
+  :focus-visible { outline: 2px solid var(--patina); outline-offset: 3px; border-radius: 2px; }
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 1.25rem; }
+  code, pre, kbd { font-family: var(--mono); }
+
+  /* ---- header ---- */
+  header { border-bottom: 1px solid var(--mist); }
+  .nav { display: flex; align-items: baseline; gap: 1.5rem; padding: 1.1rem 0; font-family: var(--sans); font-size: .9rem; }
+  .brand { font-family: var(--serif); font-size: 1.15rem; font-weight: 700; letter-spacing: .01em; color: var(--ink); text-decoration: none; }
+  .brand .seal { color: var(--patina); }
+  .nav .links { margin-left: auto; display: flex; gap: 1.25rem; }
+  .nav .links a { color: var(--graphite); text-decoration: none; }
+  .nav .links a:hover { color: var(--patina); }
+
+  /* ---- hero ---- */
+  .hero { padding: 4.5rem 0 3.5rem; }
+  .hero h1 {
+    font-size: clamp(2.1rem, 5.2vw, 3.4rem);
+    line-height: 1.12;
+    font-weight: 700;
+    letter-spacing: -.015em;
+    max-width: 21ch;
+  }
+  .hero h1 em { font-style: italic; color: var(--patina); }
+  .hero .sub {
+    margin-top: 1.1rem;
+    max-width: 52ch;
+    font-size: 1.15rem;
+    color: var(--graphite);
+  }
+  .hero .sub strong { color: var(--ink); font-weight: 600; }
+  .cmd {
+    margin-top: 1.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: .9rem;
+    background: var(--panel);
+    border: 1px solid var(--mist);
+    border-radius: 8px;
+    padding: .8rem 1rem;
+    font-family: var(--mono);
+    font-size: .92rem;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .cmd .prompt { color: var(--patina); user-select: none; }
+  .cmd .caret {
+    display: inline-block; width: .55em; height: 1.15em;
+    background: var(--patina); vertical-align: text-bottom; margin-left: 2px;
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .copy {
+    font-family: var(--sans); font-size: .78rem;
+    border: 1px solid var(--mist); background: transparent; color: var(--graphite);
+    border-radius: 6px; padding: .3rem .6rem; cursor: pointer; flex-shrink: 0;
+  }
+  .copy:hover { border-color: var(--patina); color: var(--patina); }
+  .facts { margin-top: 1.1rem; font-family: var(--sans); font-size: .84rem; color: var(--graphite); }
+  .facts span + span::before { content: "·"; margin: 0 .6rem; color: var(--mist); }
+
+  /* ---- the two ledgers (signature) ---- */
+  .ledgers { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin: 3rem 0 0; }
+  @media (max-width: 720px) { .ledgers { grid-template-columns: 1fr; } }
+  .ledger { background: var(--panel); border: 1px solid var(--mist); border-radius: 10px; overflow: hidden; }
+  .ledger .label {
+    font-family: var(--sans); font-size: .78rem; letter-spacing: .06em; text-transform: uppercase;
+    padding: .6rem .95rem; border-bottom: 1px solid var(--mist); color: var(--graphite);
+  }
+  .ledger .label b { color: var(--patina); letter-spacing: .06em; }
+  .ledger pre { padding: .95rem; font-size: .8rem; line-height: 1.55; overflow-x: auto; }
+  .ledger .k { color: var(--patina); }
+  .ledger .dim { color: var(--graphite); }
+  .ledger.cipher pre { color: var(--graphite); }
+  .ledgers-note { margin-top: .8rem; font-size: .9rem; color: var(--graphite); font-style: italic; }
+  .ledgers-note a { color: var(--patina); }
+
+  /* ---- sections ---- */
+  section { padding: 3.5rem 0; border-top: 1px solid var(--mist); }
+  .eyebrow {
+    font-family: var(--sans); font-size: .78rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--patina); margin-bottom: .6rem;
+  }
+  h2 { font-size: 1.7rem; letter-spacing: -.01em; line-height: 1.2; max-width: 28ch; }
+  .lede { margin-top: .8rem; max-width: 58ch; color: var(--graphite); }
+
+  sup.cite a {
+    font-family: var(--sans); font-size: .68em; color: var(--patina);
+    text-decoration: none; padding: 0 .1em;
+  }
+  sup.cite a:hover { text-decoration: underline; }
+
+  .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; margin-top: 2.2rem; }
+  @media (max-width: 860px) { .pillars { grid-template-columns: 1fr; } }
+  .pillar h3 { font-size: 1.12rem; margin-bottom: .5rem; }
+  .pillar p { font-size: .95rem; color: var(--graphite); }
+  .pillar code { font-size: .82em; background: var(--patina-wash); border-radius: 4px; padding: .08em .35em; color: var(--patina-deep); }
+
+  /* ---- terminal ---- */
+  .term { background: var(--panel); border: 1px solid var(--mist); border-radius: 10px; margin-top: 2rem; overflow: hidden; }
+  .term .bar { display: flex; gap: .4rem; padding: .65rem .9rem; border-bottom: 1px solid var(--mist); }
+  .term .bar i { width: .65rem; height: .65rem; border-radius: 50%; background: var(--mist); }
+  .term pre { padding: 1rem 1.1rem; font-size: .82rem; line-height: 1.7; overflow-x: auto; }
+  .term .call { color: var(--patina); font-weight: 600; }
+  .term .dim { color: var(--graphite); }
+  .term .add { color: var(--patina); }
+  .term .del { color: #A85B45; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .term-note { font-size: .84rem; color: var(--graphite); font-style: italic; margin-top: .6rem; }
+
+  /* ---- sync ---- */
+  .keychain {
+    font-family: var(--mono); font-size: .82rem; background: var(--panel);
+    border: 1px solid var(--mist); border-radius: 10px; padding: 1rem 1.1rem;
+    margin-top: 2rem; overflow-x: auto; line-height: 1.8;
+  }
+  .keychain .k { color: var(--patina); }
+  .keychain .dim { color: var(--graphite); }
+  .sync-points { margin-top: 1.6rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem 2.2rem; }
+  @media (max-width: 720px) { .sync-points { grid-template-columns: 1fr; } }
+  .sync-points li { list-style: none; font-size: .95rem; color: var(--graphite); padding-left: 1.1rem; position: relative; }
+  .sync-points li::before { content: "§"; position: absolute; left: 0; color: var(--patina); font-family: var(--serif); }
+  .sync-points b { color: var(--ink); font-weight: 600; }
+
+  /* ---- pro ---- */
+  .plans { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-top: 2rem; }
+  @media (max-width: 860px) { .plans { grid-template-columns: 1fr; } }
+  .plan { background: var(--panel); border: 1px solid var(--mist); border-radius: 10px; padding: 1.2rem 1.3rem; }
+  .plan h3 { font-size: 1.08rem; margin-bottom: .15rem; }
+  .plan .price { font-family: var(--sans); font-size: .92rem; color: var(--patina); font-weight: 600; margin-bottom: .8rem; }
+  .plan ul { list-style: none; }
+  .plan li { font-size: .92rem; color: var(--graphite); padding-left: 1.1rem; position: relative; margin-bottom: .45rem; }
+  .plan li::before { content: "§"; position: absolute; left: 0; color: var(--patina); font-family: var(--serif); }
+  .plan li b { color: var(--ink); font-weight: 600; }
+  .pro-form { margin-top: 1.1rem; display: flex; flex-wrap: wrap; gap: .6rem; }
+  .pro-form input {
+    flex: 1 1 100%; font-family: var(--mono); font-size: .85rem;
+    padding: .55rem .7rem; border: 1px solid var(--mist); border-radius: 6px;
+    background: var(--paper); color: var(--ink);
+  }
+  .pro-form input:invalid:not(:placeholder-shown) { border-color: #A85B45; }
+  .pro-form button {
+    font-family: var(--sans); font-size: .85rem; font-weight: 600;
+    padding: .5rem .95rem; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--patina); background: var(--patina); color: var(--paper);
+  }
+  .pro-form button.alt { background: transparent; color: var(--patina); }
+  .plan-note { margin-top: .9rem; font-size: .84rem; color: var(--graphite); font-style: italic; }
+
+  /* ---- quick start ---- */
+  .starts { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-top: 2rem; }
+  @media (max-width: 860px) { .starts { grid-template-columns: 1fr; } }
+  .start { background: var(--panel); border: 1px solid var(--mist); border-radius: 10px; padding: 1.1rem 1.2rem; }
+  .start h3 { font-family: var(--sans); font-size: .82rem; letter-spacing: .06em; text-transform: uppercase; color: var(--graphite); margin-bottom: .7rem; }
+  .start pre { font-size: .8rem; line-height: 1.6; overflow-x: auto; }
+  .start p { font-size: .85rem; color: var(--graphite); margin-top: .7rem; }
+  .start .dim { color: var(--graphite); }
+
+  /* ---- footnotes / footer ---- */
+  .footnotes { font-size: .88rem; color: var(--graphite); }
+  .footnotes h2 { font-size: 1.05rem; margin-bottom: 1rem; }
+  .footnotes ol { margin-left: 1.2rem; }
+  .footnotes li { margin-bottom: .45rem; }
+  .footnotes li:target { color: var(--ink); }
+  .footnotes code { font-size: .85em; }
+  footer { border-top: 1px solid var(--mist); padding: 2rem 0 3rem; font-family: var(--sans); font-size: .84rem; color: var(--graphite); }
+  footer .cols { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+  footer .motto { margin-top: 1.4rem; font-family: var(--serif); font-style: italic; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Main">
+      <a href="#memory">Memory</a>
+      <a href="#sync">Sync</a>
+      <a href="#pro">Pro</a>
+      <a href="#start">Quick start</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <h1>Your agents forget.<br>Give them a <em>historian</em>.</h1>
+    <p class="sub">Tacitus turns any folder of Markdown into long-term memory for AI agents —
+      <strong>every fact carries its source</strong>, every write is audited and revertible,
+      and notes stay plain files on your disk. No cloud, no lock-in.</p>
+
+    <div class="cmd">
+      <span class="prompt">$</span>
+      <span id="qs">npx -y @dashiro/tacitus-mcp-server /path/to/your/vault</span><span class="caret" aria-hidden="true"></span>
+      <button class="copy" data-copy="npx -y @dashiro/tacitus-mcp-server /path/to/your/vault">copy</button>
+    </div>
+    <p class="facts">
+      <span>MIT license</span><span>Rust core, zero-dep binary</span><span>works with Claude Code, Claude Desktop, any MCP client</span>
+    </p>
+
+    <div class="ledgers" aria-label="What your agent sees versus what the sync relay sees">
+      <div class="ledger">
+        <div class="label">what your agent sees <b>— everything</b></div>
+        <pre>
+<span class="dim">.tacitus/memory/client-x-deadline.md</span>
+<span class="k">---</span>
+<span class="k">type:</span> project
+<span class="k">source:</span> notes/meetings/2026-07-14.md
+<span class="k">---</span>
+Client X filing deadline is <b>Sep 30</b>,
+moved from Aug 15 at their request.</pre>
+      </div>
+      <div class="ledger cipher">
+        <div class="label">what the sync relay sees <b>— nothing</b></div>
+        <pre>
+<span class="dim">log.jsonl</span>
+{"seq":412,"ts":1785165031,"blob":"pXaK
+9dQ2vTZo1mHc8RfW3sYxNAgL5uEjB0kO4iCnDr…"}
+{"seq":413,"ts":1785165094,"blob":"Vb7T
+qwzR2eKm0XsJcU6fHdPl8oGyAn3iM1NtE5aB9v…"}</pre>
+      </div>
+    </div>
+    <p class="ledgers-note"><i>tacitus</i>, Latin: <b>silent</b>. The relay keeps your record and can't read a word of it.<sup class="cite"><a href="#fn4">4</a></sup></p>
+  </div>
+
+  <section id="memory">
+    <div class="wrap">
+      <p class="eyebrow">The record</p>
+      <h2>Memory a careful historian would keep</h2>
+      <p class="lede">Agents don't need another vector database. They need facts with provenance,
+        retrieval that respects the context window, and the ability to write things down without breaking anything.</p>
+      <div class="pillars">
+        <div class="pillar">
+          <h3>Provenance, not vibes<sup class="cite"><a href="#fn1">1</a></sup></h3>
+          <p>Typed, queryable memories in plain Markdown. Every fact names its source note;
+            contradictions are surfaced, never silently resolved. <code>remember</code>, <code>recall</code>, <code>forget</code>.</p>
+        </div>
+        <div class="pillar">
+          <h3>Retrieval that fits the window</h3>
+          <p>Search returns ranked snippets under a token budget you set — never whole notes.
+            <code>get_note</code> discloses progressively: outline → frontmatter → full.
+            The wikilink graph is a queryable API. Hybrid lexical + semantic, offline by default.</p>
+        </div>
+        <div class="pillar">
+          <h3>Write-back you can undo<sup class="cite"><a href="#fn2">2</a></sup></h3>
+          <p>Agents propose a changeset, you preview the diff, commits are atomic, and any
+            version reverts.<sup class="cite"><a href="#fn3">3</a></sup> Read-only scope forbids
+            mutation outright. Every write lands in the audit log.</p>
+        </div>
+      </div>
+
+      <div class="term" role="img" aria-label="An abridged agent session using Tacitus tools">
+        <div class="bar"><i></i><i></i><i></i></div>
+        <pre>
+<span class="call">recall</span>({ query: "client x deadline", token_budget: 300 })
+<span class="dim">→ 1 memory, 41 tokens:</span> "Filing deadline is Sep 30, moved from Aug 15."
+  <span class="dim">source: notes/meetings/2026-07-14.md</span>
+
+<span class="call">propose_changes</span>({ note: "clients/client-x.md", … })
+<span class="dim">→ changeset cs_91, preview:</span>
+  <span class="del">- Deadline: August 15</span>
+  <span class="add">+ Deadline: September 30 (moved 2026-07-14)</span>
+
+<span class="call">commit_changes</span>({ changeset: "cs_91" })
+<span class="dim">→ committed as v18 · audit: {origin:"agent", tool:"commit_changes", note:"clients/client-x.md"}</span>
+
+<span class="call">revert</span>({ note: "clients/client-x.md", to_version: 17 })
+<span class="dim">→ reverted. Nothing an agent does is permanent unless you want it to be.</span></pre>
+      </div>
+      <p class="term-note">An abridged session — 25 tools in the native binary, 16 in the npm server, all schema-validated with structured errors.</p>
+    </div>
+  </section>
+
+  <section id="sync">
+    <div class="wrap">
+      <p class="eyebrow">The silence</p>
+      <h2>Sync where the relay knows nothing</h2>
+      <p class="lede">Multi-device CRDT sync through a relay that only ever stores ciphertext.
+        The vault code <b>is</b> the key — everything derives from it, locally, on every device.</p>
+
+      <div class="keychain">
+<span class="dim"># tacitus-mcp sync init  →  prints your vault code</span>
+root       = argon2id(<span class="k">code</span>, salt v1)
+vault_key  = HKDF(root, <span class="dim">"tacitus/v1/vault-key"</span>)   <span class="dim"># XChaCha20-Poly1305</span>
+vault_id   = HKDF(root, <span class="dim">"tacitus/v1/vault-id"</span>)    <span class="dim"># all the relay ever learns</span></div>
+
+      <ul class="sync-points">
+        <li><b>No conflicts, no lost edits.</b> Every note is a text CRDT; concurrent edits merge with both sides preserved. Deletes are causal — an unseen edit resurrects the note.</li>
+        <li><b>Live co-editing.</b> Two devices on the same note merge at keystroke level, end-to-end encrypted, with presence — who's online, which note, typing or not.</li>
+        <li><b>Self-hostable.</b> The relay is ~one MIT-licensed Rust crate with a Docker image. Or use ours, free while in beta: <code>wss://sync.tacitus.md</code>.</li>
+        <li><b>No size ceiling.</b> Clients compact the encrypted log themselves — as of v0.23, snapshots chunk, so vaults of any size stay bounded.<sup class="cite"><a href="#fn4">4</a></sup></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="pro">
+    <div class="wrap">
+      <p class="eyebrow">The commission</p>
+      <h2>Free for every vault. Pro when yours grows.</h2>
+      <p class="lede">The code is MIT and self-hosting is unlimited, forever.
+        Pro is for the hosted relay: a bigger quota for your vault, and it pays
+        the historian's keep. <b>Still no account</b> — billing learns exactly
+        what the relay knows: your vault id, nothing else.</p>
+      <div class="plans">
+        <div class="plan">
+          <h3>Free</h3>
+          <p class="price">€0 — the hosted relay, in beta</p>
+          <ul>
+            <li><b>100 MB</b> of encrypted log per vault on <code>sync.tacitus.md</code></li>
+            <li>Every feature: live sync, presence, co-editing, compaction — nothing is paywalled</li>
+            <li>Self-hosted relays have <b>no limits at all</b> (one MIT Rust crate, Docker image included)</li>
+          </ul>
+        </div>
+        <div class="plan">
+          <h3>Pro</h3>
+          <p class="price">€5 / month · €48 / year, per vault</p>
+          <ul>
+            <li><b>1 GB</b> of encrypted log per vault — ten times the room</li>
+            <li>Cancel anytime through Stripe; the vault falls back to Free, your files never at risk</li>
+            <li>Funds the free tier and the roadmap</li>
+          </ul>
+          <form class="pro-form" action="https://sync.tacitus.md/billing/checkout" method="get">
+            <input name="vault_id" pattern="[0-9a-f]{32}" required
+                   placeholder="your vault id — run: tacitus-mcp sync status"
+                   aria-label="Vault id (32 lowercase hex characters)">
+            <button name="plan" value="monthly">Go Pro — €5/mo</button>
+            <button class="alt" name="plan" value="yearly">€48/yr</button>
+          </form>
+          <p class="plan-note">The vault id is safe to share with us: it's derived one-way
+            from your vault code and decrypts nothing.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <p class="eyebrow">Begin the record</p>
+      <h2>Two ways in, under a minute</h2>
+      <div class="starts">
+        <div class="start">
+          <h3>npm — any MCP client</h3>
+          <pre>npx -y @dashiro/tacitus-mcp-server /path/to/vault</pre>
+          <p>Claude Code, one line:</p>
+          <pre>claude mcp add tacitus -- npx -y \
+  @dashiro/tacitus-mcp-server /path/to/vault</pre>
+        </div>
+        <div class="start">
+          <h3>Native binary — no Node, 25 tools</h3>
+          <pre><span class="dim"># macOS / Linux</span>
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ionasrobert/tacitus-mcp-server/releases/latest/download/tacitus-mcp-installer.sh | sh</pre>
+          <p>Windows: <code>irm …/tacitus-mcp-installer.ps1 | iex</code> ·
+             then <code>claude mcp add tacitus -- tacitus-mcp /path/to/vault</code></p>
+        </div>
+      </div>
+      <p class="lede" style="margin-top:1.6rem">Building on top? A Tacitus plugin is just an MCP client — permission-scoped, versioned, audited.
+        There's a <a href="https://github.com/ionasrobert/tacitus-mcp-server/tree/main/packages/sdk">typed TypeScript SDK</a>,
+        sandboxed WASM plugins, and an <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md">API reference for all tools</a>.</p>
+    </div>
+  </section>
+
+  <section class="footnotes" aria-label="Footnotes">
+    <div class="wrap">
+      <h2>Sources — because claims should have them</h2>
+      <ol>
+        <li id="fn1">Memories are Markdown with YAML frontmatter in <code>.tacitus/memory/</code> — read them with any editor.</li>
+        <li id="fn2">Version snapshots in <code>.tacitus/history/</code>; <code>revert</code> restores any of them atomically.</li>
+        <li id="fn3">Every agent write appends to <code>.tacitus/audit.log</code> (JSONL): who, what, when, which tool.</li>
+        <li id="fn4">Protocol, threat model, and what a malicious relay can and cannot do:
+          <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md">docs/SYNC.md</a>.
+          Short version: it can withhold; it can never read, forge, or splice.</li>
+      </ol>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md">API reference</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/PLUGINS.md">Plugins</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md">Sync</a>
+      <span>MIT © Robert Ionas</span>
+    </div>
+    <p class="motto">Sine ira et studio — recorded without anger or favor, encrypted without exception.</p>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      navigator.clipboard.writeText(btn.dataset.copy).then(function () {
+        btn.textContent = "copied";
+        setTimeout(function () { btn.textContent = "copy"; }, 1600);
+      });
+    });
+  });
+</script>
+</body>
+</html>
