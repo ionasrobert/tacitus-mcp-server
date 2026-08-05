@@ -131,8 +131,8 @@ still *withhold* data; that's inherent to relays and unchanged.)
 
 Limits: a snapshot that fits 32 MB travels as the single blob above,
 byte-identical to 0.22. Bigger vaults chunk (0.23+): docs are packed into
-separately-encrypted **parts** (≤32 MB each, ≤512 MB total — a snapshot
-never outgrows the log it replaces). Each part's set membership
+separately-encrypted **parts** (≤32 MB each, ≤ the vault's quota in total —
+a snapshot never outgrows the log it replaces). Each part's set membership
 (`snapshot_part {upto, idx, of}`) travels inside its ciphertext, and a
 client advances its cursor ONLY after applying a complete consistent set —
 a relay withholding or splicing parts can stall a client, never skip it
@@ -147,7 +147,13 @@ token, since_seq, caps}`; server → `welcome {latest_seq, caps, log_bytes}`
 `ack {seq}` + fanout to ALL of the vault's connections, pusher included
 (cursors advance only through the update stream). Auth is
 trust-on-first-use per vault. Per-vault append-only JSONL log, fsynced;
-512 MB backstop cap, bounded in practice by compaction.
+per-vault storage quota (512 MB default), bounded in practice by
+compaction. Hosted tiers configure the quota: `TACITUS_RELAY_QUOTA_DEFAULT`
+sets the default in bytes, and an `entitlements.json`
+(`TACITUS_RELAY_ENTITLEMENTS`, default `<data>/entitlements.json`) grants
+per-vault overrides — `{"version":1,"vaults":{"<vault_id>":
+{"quota_bytes":N,"tier":"pro"}}}`, hot-reloaded, so billing can rewrite it
+without a relay restart.
 
 **Extensions & compatibility:** new message *variants* are parse errors for
 old peers, so they are capability-gated: a client lists what it speaks in
@@ -185,6 +191,23 @@ untouched, the connection survives, and a live session shrugs them off
 (losing the compaction race to another device is that device doing the
 job).
 
+The fourth extension is `quota` (0.24+), for per-vault storage quotas:
+`welcome.quota_bytes` reports the vault's effective quota (defaults to 0 =
+"relay predates quotas"; a real quota is never 0), and an over-quota `push`
+is refused — `err {code:"quota_exceeded"}` to clients that advertised the
+cap, the legacy `err {code:"log_full"}` to everyone else (an unknown err
+code is fatal to old clients, so the new one is never sent unasked). The
+refusal consumes no sequence number and the connection survives.
+Compaction is deliberately **exempt** from the quota — it is the cure —
+only the snapshot itself must fit (`compact_too_large` otherwise, already
+advisory). A live client answers the first refusal by emitting
+`QuotaExceeded` and offering one compaction immediately (bypassing its
+size threshold — the refused push blocks catch-up, so the normal trigger
+can never run), re-sends its pending pushes once the relay confirms
+`compacted`, and treats only a refusal after a failed heal as fatal:
+upgrade the tier or shrink the vault. Reads are never gated — an
+over-quota vault still serves its full backlog.
+
 ## Caveats
 
 - Don't point sync at a vault that's also inside Dropbox/iCloud sync —
@@ -194,9 +217,18 @@ job).
   race on the same `.tacitus/sync/` state.
 - A single note whose sealed CRDT state exceeds 32 MB can't ride a
   snapshot (a doc never splits across parts) — such a vault doesn't
-  compact and grows toward the 512 MB cap. Whole-vault size stopped
+  compact and grows toward its quota. Whole-vault size stopped
   mattering in 0.23: bigger states just chunk.
 - Don't downgrade a relay below 0.23 while a chunked snapshot is stored:
   a 0.22 relay can't read the v2 `snapshot.json` and would serve the
   truncated log as if nothing were missing. Single-part snapshots keep
   the 0.22 file format, so vaults under 32 MB are downgrade-safe.
+- A vault whose **sealed state** exceeds its quota can't compact under it:
+  pushes stay refused (each live session surfaces `QuotaExceeded`, then
+  ends with a `quota_exceeded` error) until the tier is raised or the
+  vault shrinks. Local files are never at risk — sync just stops
+  uploading.
+- Operators: the quota bounds `log.jsonl` and the snapshot total
+  *separately*, and one previous log generation (`log.prev.jsonl`) is kept
+  for recovery — so worst-case disk per vault is ≈ 3× its quota. Size a
+  "100 MB" tier's hosting accordingly.
