@@ -166,6 +166,16 @@ pub enum LiveEvent {
     Compacted {
         upto_seq: u64,
     },
+    /// The relay refused a push: the vault is over its storage quota
+    /// (`quota_bytes` is 0 when a legacy relay said `log_full`; both are
+    /// welcome-time numbers). Emitted once per session — the session
+    /// answers by offering a compaction, and only if the sealed state
+    /// truly cannot fit under the quota does a later refusal end the
+    /// session with a RELAY error (upgrade the tier or shrink the vault).
+    QuotaExceeded {
+        quota_bytes: u64,
+        log_bytes: u64,
+    },
 }
 
 /// Pure backoff progression: min on the first failure, doubling to max.
@@ -173,6 +183,42 @@ fn next_backoff(prev: Option<Duration>, config: &LiveConfig) -> Duration {
     match prev {
         None => config.backoff_min,
         Some(d) => (d * 2).min(config.backoff_max),
+    }
+}
+
+/// Per-session quota-heal progression. Compaction is exempt from the quota
+/// (it shrinks the log), so a refusal is an emergency the session can often
+/// fix itself: the first one triggers one compaction offer — bypassing the
+/// threshold trigger, which can never run because the refused push blocks
+/// `CaughtUp`. Per-session state: a reconnecting client heals afresh every
+/// session, so the fatal arm can't livelock across reconnects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuotaHeal {
+    Idle,
+    /// A compaction offer is in flight for a quota refusal.
+    Healing,
+    /// The heal ran, was refused, or never could run — the next quota
+    /// refusal is an honest fatal.
+    Concluded,
+}
+
+enum QuotaAction {
+    /// Send one compaction offer, then drop the refusal frame.
+    OfferAndDrop,
+    /// Drop the refusal frame (heal in flight, or nothing to offer yet).
+    Drop,
+    /// Let the refusal reach the engine — fatal, exactly like pre-quota.
+    Fatal,
+}
+
+fn on_quota_refusal(state: QuotaHeal, can_offer: bool) -> (QuotaHeal, QuotaAction) {
+    match state {
+        QuotaHeal::Idle if can_offer => (QuotaHeal::Healing, QuotaAction::OfferAndDrop),
+        // Nothing to offer (no compact cap, empty log): still advisory —
+        // the fatal arm is reserved for a CONCLUDED failed heal.
+        QuotaHeal::Idle => (QuotaHeal::Concluded, QuotaAction::Drop),
+        QuotaHeal::Healing => (QuotaHeal::Healing, QuotaAction::Drop),
+        QuotaHeal::Concluded => (QuotaHeal::Concluded, QuotaAction::Fatal),
     }
 }
 
@@ -349,8 +395,10 @@ fn debounced_at(last_sent: Option<Instant>, debounce: Duration) -> Instant {
 /// Run a persistent live session: connect, stream, apply, reconnect with
 /// backoff on network failure — forever. Returns `Ok(())` when every cmd
 /// sender is dropped (clean shutdown; a goodbye is sent and pending applies
-/// are flushed first). Non-network errors (auth, log_full, local IO/write
-/// failures) return `Err` — the host decides what to tell the user.
+/// are flushed first). Non-network errors (auth, local IO/write failures, a
+/// quota refusal after a failed heal) return `Err` — the host decides what
+/// to tell the user. A first quota/log_full refusal is NOT fatal: the
+/// session emits `QuotaExceeded` and tries to compact its way under.
 pub async fn run_live<F>(
     engine: &mut SyncEngine,
     writer: &mut NoteWriter,
@@ -498,7 +546,9 @@ where
     let mut compact_on = false;
     let mut compact2_on = false;
     let mut welcome_log_bytes = 0u64;
+    let mut welcome_quota_bytes = 0u64;
     let mut compact_offered = false;
+    let mut quota_heal = QuotaHeal::Idle;
     let mut next_presence = Instant::now() + config.presence_interval;
     let mut presence_dirty = false;
     let mut presence_send_at = Instant::now();
@@ -607,6 +657,7 @@ where
                     latest_seq,
                     caps,
                     log_bytes,
+                    quota_bytes,
                 } = &msg
                 {
                     *backoff = None;
@@ -615,6 +666,7 @@ where
                     compact_on = caps.iter().any(|c| c == CAP_COMPACT);
                     compact2_on = caps.iter().any(|c| c == CAP_COMPACT2);
                     welcome_log_bytes = *log_bytes;
+                    welcome_quota_bytes = *quota_bytes;
                     on_event(LiveEvent::Connected {
                         latest_seq: *latest_seq,
                     });
@@ -643,6 +695,18 @@ where
                 }
                 if let ServerMsg::Compacted { upto_seq } = &msg {
                     on_event(LiveEvent::Compacted { upto_seq: *upto_seq });
+                    if quota_heal == QuotaHeal::Healing {
+                        // The heal's actual point: the refused push consumed
+                        // no seq and sits in the outbox, and NOTHING else
+                        // re-sends it within a session (only a Welcome
+                        // does) — so re-send it now that the log shrank.
+                        quota_heal = QuotaHeal::Concluded;
+                        if let Some(reason) =
+                            send_all(&mut sink, &engine.pending_pushes()).await?
+                        {
+                            return Ok(SessionEnd::Network(reason));
+                        }
+                    }
                 }
                 // A refused compaction offer is advisory (log untouched,
                 // connection fine) — losing the race to another device is
@@ -650,7 +714,47 @@ where
                 // chunked upload window makes the race realistic.
                 if let ServerMsg::Err { code, .. } = &msg {
                     if compact_offered && COMPACT_REFUSALS.contains(&code.as_str()) {
+                        if quota_heal == QuotaHeal::Healing {
+                            // The cure itself was refused (snapshot can't
+                            // fit the quota) — the next refusal is honest.
+                            quota_heal = QuotaHeal::Concluded;
+                        }
                         continue;
+                    }
+                    if code == "quota_exceeded" || code == "log_full" {
+                        let first = quota_heal == QuotaHeal::Idle;
+                        let can_offer = compact_on && engine.last_seq() > 0;
+                        let (next, action) = on_quota_refusal(quota_heal, can_offer);
+                        quota_heal = next;
+                        if !matches!(action, QuotaAction::Fatal) {
+                            if first {
+                                on_event(LiveEvent::QuotaExceeded {
+                                    quota_bytes: welcome_quota_bytes,
+                                    log_bytes: welcome_log_bytes,
+                                });
+                            }
+                            if matches!(action, QuotaAction::OfferAndDrop) {
+                                compact_offered = true;
+                                let offer =
+                                    engine.snapshot_state_parts(config.snapshot_part_budget)?;
+                                let chunked = offer
+                                    .iter()
+                                    .any(|m| matches!(m, ClientMsg::CompactPart { .. }));
+                                if !chunked || compact2_on {
+                                    if let Some(reason) = send_all(&mut sink, &offer).await? {
+                                        return Ok(SessionEnd::Network(reason));
+                                    }
+                                } else {
+                                    // A chunked offer can't ship to a
+                                    // compact-only relay — the heal is over
+                                    // before it started.
+                                    quota_heal = QuotaHeal::Concluded;
+                                }
+                            }
+                            continue;
+                        }
+                        // Fatal: fall through to the engine, which returns
+                        // the RELAY error — upgrade the tier or shrink.
                     }
                 }
                 // Fold-before-apply: local disk state enters the CRDT before
@@ -1021,5 +1125,33 @@ mod tests {
         assert!(debounced_at(recent, debounce) >= now + debounce);
         let long_ago = Some(now - Duration::from_secs(10));
         assert!(debounced_at(long_ago, debounce) <= Instant::now());
+    }
+
+    #[test]
+    fn quota_heal_state_machine_transitions() {
+        use QuotaAction::*;
+        use QuotaHeal::*;
+
+        // First refusal with something to offer: heal.
+        assert!(matches!(
+            on_quota_refusal(Idle, true),
+            (Healing, OfferAndDrop)
+        ));
+        // First refusal with nothing to offer: still advisory, but the heal
+        // is over — the fatal arm names a CONCLUDED failure.
+        assert!(matches!(on_quota_refusal(Idle, false), (Concluded, Drop)));
+        // While the offer is in flight, further refusals are dropped
+        // (regardless of can_offer — one offer per session).
+        assert!(matches!(on_quota_refusal(Healing, true), (Healing, Drop)));
+        assert!(matches!(on_quota_refusal(Healing, false), (Healing, Drop)));
+        // After a concluded heal, a refusal is honest-fatal.
+        assert!(matches!(
+            on_quota_refusal(Concluded, true),
+            (Concluded, Fatal)
+        ));
+        assert!(matches!(
+            on_quota_refusal(Concluded, false),
+            (Concluded, Fatal)
+        ));
     }
 }

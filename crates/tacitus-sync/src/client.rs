@@ -18,8 +18,9 @@ use crate::SyncError;
 const QUIET_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The post-offer wait during `run_compact`: committing a chunked snapshot
-/// fsyncs the parts and rewrites a possibly ~512 MiB log inside the relay's
-/// select loop, so no frames (not even pings) flow meanwhile.
+/// fsyncs the parts and rewrites a log as big as the vault's quota (512 MiB
+/// by default) inside the relay's select loop, so no frames (not even
+/// pings) flow meanwhile.
 const COMPACT_QUIET_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]

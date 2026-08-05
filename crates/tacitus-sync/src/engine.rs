@@ -18,7 +18,7 @@ use crate::crypto::{self, DocUpdate, Keys, SnapshotPart, SyncPayload, VaultCode}
 use crate::docs::DocStore;
 use crate::outbox::Outbox;
 use crate::presence::{presence_aad, PresencePayload, PresenceState};
-use crate::protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE};
+use crate::protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE, CAP_QUOTA};
 use crate::scan::scan;
 use crate::state::ShadowState;
 use crate::SyncError;
@@ -217,6 +217,7 @@ impl SyncEngine {
                 CAP_PRESENCE.to_string(),
                 CAP_COMPACT.to_string(),
                 CAP_COMPACT2.to_string(),
+                CAP_QUOTA.to_string(),
             ],
         }
     }
@@ -1224,6 +1225,7 @@ mod tests {
                 latest_seq: 0,
                 caps: vec![],
                 log_bytes: 0,
+                quota_bytes: 0,
             })
             .unwrap();
         assert_eq!(effect.outbound.len(), 1);
@@ -1241,6 +1243,7 @@ mod tests {
         };
         assert!(caps.iter().any(|c| c == CAP_COMPACT));
         assert!(caps.iter().any(|c| c == CAP_COMPACT2));
+        assert!(caps.iter().any(|c| c == CAP_QUOTA));
         fs::remove_dir_all(&dir).ok();
     }
 

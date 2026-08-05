@@ -2465,6 +2465,161 @@ mod tests {
         assert!(compacted, "the session surfaced the Compacted event");
     }
 
+    // ---- per-vault quota E2E (mon-m1) ----------------------------------
+
+    #[tokio::test]
+    async fn live_session_heals_quota_refusal_by_compacting_and_resending() {
+        use tacitus_sync::client;
+        let data = temp_dir("quotaheal-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("quotaheal-va");
+        let vc = temp_dir("quotaheal-vc");
+        let code = LiveCode::generate();
+
+        // Seed the SAME note across passes: the log holds every generation,
+        // the sealed state only the last — snapshot < quota < log, so the
+        // heal can actually work.
+        let vault_id = {
+            let mut a = LiveEngine::open(&va, &code).unwrap();
+            for i in 0..6 {
+                std::fs::write(va.join("story.md"), format!("draft {i}\n")).unwrap();
+                client::run_once(&mut a, &url).await.unwrap();
+            }
+            a.vault_id().to_string()
+        };
+        let vdir = data.join(&vault_id);
+        let log_len = std::fs::metadata(vdir.join("log.jsonl")).unwrap().len();
+        let before = std::fs::read_to_string(vdir.join("log.jsonl"))
+            .unwrap()
+            .lines()
+            .count();
+
+        // Entitlement downgrade to exactly the current usage: the next push
+        // is refused, picked up by the relay without any restart.
+        std::fs::write(
+            data.join("entitlements.json"),
+            format!(r#"{{"version":1,"vaults":{{"{vault_id}":{{"quota_bytes":{log_len}}}}}}}"#),
+        )
+        .unwrap();
+
+        // A new local note; the default 4 MiB threshold never fires here —
+        // only the refusal-driven heal can compact this vault.
+        std::fs::write(va.join("fresh.md"), "written over quota\n").unwrap();
+        let a = spawn_live(&va, &code, &url, |_| {});
+
+        wait_until("heal snapshot lands on the relay", || {
+            vdir.join("snapshot.json").exists()
+        })
+        .await;
+        wait_until("log truncated and the refused push re-sent", || {
+            std::fs::read_to_string(vdir.join("log.jsonl"))
+                .map(|raw| {
+                    let n = raw.lines().count();
+                    n >= 1 && n < before
+                })
+                .unwrap_or(false)
+        })
+        .await;
+
+        // A fresh device sees the post-quota note — proof the refused push
+        // survived the heal (snapshot + re-sent tail, through the real
+        // download path).
+        let mut c = LiveEngine::open(&vc, &code).unwrap();
+        client::run_once(&mut c, &url).await.unwrap();
+        assert_eq!(
+            c.materialize("n:fresh").unwrap().as_deref(),
+            Some("written over quota\n")
+        );
+        assert_eq!(
+            c.materialize("n:story").unwrap().as_deref(),
+            Some("draft 5\n")
+        );
+
+        // Clean shutdown — the session never died on the refusal — and the
+        // events tell the story in order, with the welcome-time numbers.
+        drop(a.nudge);
+        a.task.await.unwrap().unwrap();
+        let evs: Vec<LiveEvent> = a.events.try_iter().collect();
+        let quota_at = evs
+            .iter()
+            .position(|e| matches!(e, LiveEvent::QuotaExceeded { .. }))
+            .expect("QuotaExceeded fired");
+        let compacted_at = evs
+            .iter()
+            .position(|e| matches!(e, LiveEvent::Compacted { .. }))
+            .expect("Compacted fired");
+        assert!(
+            quota_at < compacted_at,
+            "refusal precedes the heal: {evs:?}"
+        );
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                LiveEvent::QuotaExceeded { quota_bytes, .. } if *quota_bytes == log_len
+            )),
+            "the event carries the effective quota from the welcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_session_dies_honestly_when_snapshot_cannot_fit_quota() {
+        use tacitus_sync::client;
+        let data = temp_dir("quotafatal-data");
+        let url = spawn_relay(data.clone()).await;
+        let va = temp_dir("quotafatal-va");
+        let code = LiveCode::generate();
+
+        let vault_id = {
+            let mut a = LiveEngine::open(&va, &code).unwrap();
+            for i in 0..3 {
+                std::fs::write(va.join("story.md"), format!("draft {i}\n")).unwrap();
+                client::run_once(&mut a, &url).await.unwrap();
+            }
+            a.vault_id().to_string()
+        };
+
+        // 60 bytes: below any sealed snapshot, so the heal's offer is
+        // refused (compact_too_large, advisory) and the heal concludes.
+        std::fs::write(
+            data.join("entitlements.json"),
+            format!(r#"{{"version":1,"vaults":{{"{vault_id}":{{"quota_bytes":60}}}}}}"#),
+        )
+        .unwrap();
+
+        std::fs::write(va.join("extra.md"), "attempt 0\n").unwrap();
+        let a = spawn_live(&va, &code, &url, |_| {});
+
+        // Each edit is a new push and each push a new refusal. The first one
+        // starts the heal, the offer's refusal concludes it, and the first
+        // refusal AFTER that is honest-fatal — keep editing until it lands.
+        // (Deadline-capped poll, same cadence as wait_until.)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut attempt = 0u32;
+        let err = loop {
+            if a.task.is_finished() {
+                break a.task.await.unwrap().unwrap_err();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the fatal quota refusal"
+            );
+            attempt += 1;
+            std::fs::write(va.join("extra.md"), format!("attempt {attempt}\n")).unwrap();
+            let _ = a.nudge.send(LiveCmd::Nudge).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert_eq!(err.code, "RELAY");
+        assert!(err.reason.contains("quota_exceeded"), "{}", err.reason);
+
+        // The session surfaced the condition before dying.
+        let evs: Vec<LiveEvent> = a.events.try_iter().collect();
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, LiveEvent::QuotaExceeded { .. })),
+            "QuotaExceeded fired before the fatal: {evs:?}"
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_live_sessions_survive_compaction_race_and_stay_synced() {
         use tacitus_sync::client;

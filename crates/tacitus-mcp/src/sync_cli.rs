@@ -252,6 +252,18 @@ pub async fn sync_main(args: &[String]) -> Result<(), String> {
                         LiveEvent::Compacted { upto_seq } => {
                             eprintln!("compacted relay log up to seq {upto_seq}");
                         }
+                        LiveEvent::QuotaExceeded {
+                            quota_bytes,
+                            log_bytes,
+                        } => {
+                            if quota_bytes > 0 {
+                                eprintln!(
+                                    "relay storage quota reached ({log_bytes} of {quota_bytes} bytes) — compacting; if this repeats, shrink the vault or upgrade"
+                                );
+                            } else {
+                                eprintln!("relay log full — compacting");
+                            }
+                        }
                         LiveEvent::Peers(peers) => {
                             if peers.is_empty() {
                                 eprintln!("no other devices online");

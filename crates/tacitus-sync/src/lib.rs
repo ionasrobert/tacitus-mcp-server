@@ -29,7 +29,7 @@ pub use engine::{EngineEffect, Flag, SyncEngine};
 #[cfg(feature = "client")]
 pub use live::{run_live, LiveCmd, LiveConfig, LiveEvent};
 pub use presence::{Peer, PeerTracker, PresencePayload, PresenceState};
-pub use protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE};
+pub use protocol::{ClientMsg, ServerMsg, CAP_COMPACT, CAP_COMPACT2, CAP_PRESENCE, CAP_QUOTA};
 pub use scan::{scan, ItemKind, ScanDelta, ScanItem};
 pub use state::{ItemState, ShadowState};
 

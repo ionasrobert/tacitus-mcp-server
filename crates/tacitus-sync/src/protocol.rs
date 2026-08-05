@@ -42,6 +42,15 @@ pub const CAP_COMPACT: &str = "compact";
 /// same honest fatal 0.21 clients get below any snapshot.
 pub const CAP_COMPACT2: &str = "compact2";
 
+/// Capability for per-vault storage quotas (0.24+): the relay reports the
+/// vault's effective quota in `welcome.quota_bytes`, and refuses over-quota
+/// pushes with `err {code:"quota_exceeded"}` — but ONLY to clients that
+/// advertised this cap (older ones keep getting the `log_full` they know;
+/// an unknown err code is fatal to them). Compaction is exempt from the
+/// quota — it is the cure — so the live driver answers a quota refusal by
+/// offering one.
+pub const CAP_QUOTA: &str = "quota";
+
 /// Relay refusals of a compaction offer. Advisory by design (the log is
 /// untouched, the connection survives), so the live driver must not die on
 /// them — losing a compaction race is another device doing our job.
@@ -115,6 +124,11 @@ pub enum ServerMsg {
         /// crosses its threshold.
         #[serde(default)]
         log_bytes: u64,
+        /// The vault's effective storage quota (absent pre-0.24 → 0 =
+        /// "relay predates quotas"; a real quota is never 0). Display and
+        /// diagnostics only — enforcement is the relay's refusal.
+        #[serde(default)]
+        quota_bytes: u64,
     },
     Update {
         seq: u64,
@@ -215,15 +229,35 @@ mod tests {
                 caps,
                 latest_seq,
                 log_bytes,
+                quota_bytes,
             } => {
                 assert!(caps.is_empty());
                 assert_eq!(latest_seq, 9);
                 // Pre-0.22 relays don't send log_bytes — 0 means "unknown",
                 // which never crosses a compaction threshold.
                 assert_eq!(log_bytes, 0);
+                // Pre-0.24 relays don't send quota_bytes — 0 = no quota info.
+                assert_eq!(quota_bytes, 0);
             }
             other => panic!("expected welcome, got {other:?}"),
         }
+
+        // And a 0.24 welcome roundtrips the quota.
+        let json = serde_json::to_string(&ServerMsg::Welcome {
+            latest_seq: 9,
+            caps: vec![CAP_QUOTA.to_string()],
+            log_bytes: 10,
+            quota_bytes: 512,
+        })
+        .unwrap();
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ServerMsg::Welcome {
+                quota_bytes: 512,
+                ..
+            }
+        ));
     }
 
     #[test]
