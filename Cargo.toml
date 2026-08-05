@@ -30,6 +30,9 @@ ureq = { version = "3", features = ["json"] }
 chacha20poly1305 = "0.10"
 argon2 = "0.5"
 hkdf = "0.12"
+# Stripe webhook signatures (tacitus-billing) — already in the lockfile via
+# hkdf, so this adds zero packages.
+hmac = "0.12"
 base64 = "0.22"
 # Relay + sync client transport. rustls (never native-tls) — the
 # aarch64-linux cross build in cargo-dist has no C TLS toolchain.

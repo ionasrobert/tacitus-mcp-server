@@ -2105,6 +2105,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tacitus-billing"
+version = "0.24.0"
+dependencies = [
+ "axum",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
 name = "tacitus-core"
 version = "0.24.0"
 dependencies = [
