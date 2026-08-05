@@ -2106,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-billing"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "axum",
  "hmac",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "chrono",
  "regex",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-mcp"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "rmcp",
  "serde",
@@ -2149,7 +2149,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-plugins"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-relay"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "axum",
  "base64",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "tacitus-sync"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "argon2",
  "base64",
