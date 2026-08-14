@@ -4,6 +4,27 @@ Notable changes per release. Every `vX.Y.Z` tag builds native installers via
 GitHub Releases; the npm server (`@dashiro/tacitus-mcp-server`) versions
 independently. Sync protocol details live in [docs/SYNC.md](docs/SYNC.md).
 
+## 0.26.0 — 2026-08-14
+
+- **The upgrade path exists in the product now.** `sync status` opens a
+  read-only probe of the relay (welcome frame, then hang up — no frame
+  reaches the engine, so no cursor moves) and prints `storage: <used> of
+  <quota> (N%)`; past 80% it prints the checkout link for that vault. New
+  `sync upgrade [--plan monthly|yearly] [--open]` prints or opens it on
+  demand, and the `quota_exceeded` message carries the link instead of the
+  word "upgrade". None of this appears for self-hosted relays — only for
+  `sync.tacitus.md`, or wherever `TACITUS_BILLING_URL` points.
+- **`tacitus-billing --reconcile`**: rebuild `entitlements.json` from
+  Stripe's live subscription list after a lost volume or a webhook outage.
+  Dry by default (`--apply` writes), never touches operator comps, and
+  yields to any webhook that landed mid-run.
+- Terms, privacy and cancellation/refund pages (`site/*.html`) — what
+  Stripe asks for at activation and what EU distance-selling law requires;
+  linked from the pricing section and the footer, with self-serve
+  cancellation through Stripe's hosted customer portal.
+- The npm server reported version `0.1.0` in `initialize` regardless of the
+  package version; it now reads its own `package.json`.
+
 ## 0.25.0 — 2026-08-05
 
 - **Tacitus Sync Pro plumbing**: new `tacitus-billing` sidecar — Stripe

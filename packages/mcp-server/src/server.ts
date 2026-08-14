@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import { MemoryStore } from './memory/store';
@@ -37,6 +38,22 @@ async function pickEmbedder(vaultDir: string): Promise<Embedder> {
   return new HashingEmbedder();
 }
 
+/**
+ * The published package version, reported to MCP clients in `initialize`.
+ * Read from package.json rather than hardcoded — a stale literal here told
+ * every client we were 0.1.0 for two releases. `../package.json` resolves
+ * from both `src/` (tests) and the bundled `dist/` (npx).
+ */
+export function serverVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    return (require('../package.json') as { version?: string }).version ?? '0.0.0';
+  } catch {
+    // Never let metadata kill a server that otherwise works.
+    return '0.0.0';
+  }
+}
+
 /** Wire the full Tacitus tool set (memory + vault) into an MCP server. */
 export async function buildServer(
   vaultDir: string,
@@ -55,7 +72,7 @@ export async function buildServer(
   ];
   tools.push(capabilitiesTool(() => tools, scope));
 
-  const server = new McpServer({ name: 'tacitus-memory', version: '0.1.0' });
+  const server = new McpServer({ name: 'tacitus-memory', version: serverVersion() });
   for (const tool of tools) {
     const shape = (tool.inputSchema as z.ZodObject<z.ZodRawShape>).shape;
     server.tool(tool.name, tool.description, shape, async (args: Record<string, unknown>) => {
