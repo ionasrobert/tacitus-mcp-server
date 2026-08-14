@@ -147,6 +147,188 @@ pub fn apply_event(file: &mut EntFile, ev: &StripeEvent, pro_quota: u64, now: i6
     }
 }
 
+/// One line of a reconcile report — what the run did, or would do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// Stripe says paid, the file didn't know: the missed-webhook case.
+    Granted {
+        vault_id: String,
+        subscription: String,
+        status: String,
+    },
+    /// Present but wrong (stale quota, stale status, a resubscribe under a
+    /// new subscription id).
+    Corrected {
+        vault_id: String,
+        subscription: String,
+    },
+    /// The file grants Pro; Stripe has no live subscription behind it.
+    Revoked {
+        vault_id: String,
+        subscription: String,
+    },
+    /// A webhook already wrote something newer than our Stripe snapshot —
+    /// the live event wins, reconcile keeps its hands off.
+    Skipped { vault_id: String },
+}
+
+impl Change {
+    /// Skipped is the only line that touches nothing.
+    pub fn writes(&self) -> bool {
+        !matches!(self, Change::Skipped { .. })
+    }
+}
+
+impl std::fmt::Display for Change {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Change::Granted {
+                vault_id,
+                subscription,
+                status,
+            } => write!(f, "+ {vault_id}  grant pro ({subscription}, {status})"),
+            Change::Corrected {
+                vault_id,
+                subscription,
+            } => write!(f, "~ {vault_id}  correct entry ({subscription})"),
+            Change::Revoked {
+                vault_id,
+                subscription,
+            } => write!(f, "- {vault_id}  revoke ({subscription} is gone at Stripe)"),
+            Change::Skipped { vault_id } => {
+                write!(
+                    f,
+                    "= {vault_id}  left alone (a newer webhook already wrote)"
+                )
+            }
+        }
+    }
+}
+
+/// Rebuild the file from Stripe's live subscription list. Pure — no IO, no
+/// clock reads. `snapshot_ts` must be taken BEFORE the Stripe call: it is
+/// the high-water mark stamped on everything we touch, so a webhook created
+/// after our read still wins the ordering guard instead of being ignored.
+///
+/// Two rules keep this safe to run at any time:
+/// - entries without `stripe_subscription` (operator comps) are invisible
+///   to reconcile — it never revokes what it didn't sell;
+/// - an entry whose `last_event_ts` is newer than the snapshot is skipped —
+///   a webhook that landed mid-run is fresher truth than our list.
+pub fn reconcile(
+    file: &mut EntFile,
+    live: &[crate::stripe::Subscription],
+    pro_quota: u64,
+    snapshot_ts: i64,
+) -> Vec<Change> {
+    use crate::stripe::{action_for, valid_vault_id, Action};
+
+    // Stripe lists newest first, so the first entitling subscription for a
+    // vault wins if someone somehow holds two.
+    let mut entitled: BTreeMap<&str, &crate::stripe::Subscription> = BTreeMap::new();
+    for sub in live {
+        let Some(vault_id) = sub.metadata.get("vault_id") else {
+            continue;
+        };
+        if !valid_vault_id(vault_id) {
+            continue;
+        }
+        if action_for("customer.subscription.updated", &sub.status) != Action::Upsert {
+            continue;
+        }
+        entitled.entry(vault_id.as_str()).or_insert(sub);
+    }
+
+    enum Plan {
+        Skip,
+        UpToDate,
+        Write { present: bool },
+    }
+
+    let mut changes = Vec::new();
+    for (vault_id, sub) in &entitled {
+        let (plan, extra) = match file.vaults.get(*vault_id) {
+            Some(e) if e.last_event_ts.is_some_and(|ts| ts > snapshot_ts) => {
+                (Plan::Skip, serde_json::Map::new())
+            }
+            Some(e) => {
+                let current = e.quota_bytes == pro_quota
+                    && e.tier.as_deref() == Some("pro")
+                    && e.stripe_subscription.as_deref() == Some(sub.id.as_str())
+                    && e.status.as_deref() == Some(sub.status.as_str());
+                let plan = if current {
+                    Plan::UpToDate
+                } else {
+                    Plan::Write { present: true }
+                };
+                (plan, e.extra.clone())
+            }
+            None => (Plan::Write { present: false }, serde_json::Map::new()),
+        };
+        match plan {
+            Plan::UpToDate => {}
+            Plan::Skip => changes.push(Change::Skipped {
+                vault_id: (*vault_id).to_string(),
+            }),
+            Plan::Write { present } => {
+                file.vaults.insert(
+                    (*vault_id).to_string(),
+                    Entitlement {
+                        quota_bytes: pro_quota,
+                        tier: Some("pro".into()),
+                        stripe_customer: Some(sub.customer.clone()),
+                        stripe_subscription: Some(sub.id.clone()),
+                        status: Some(sub.status.clone()),
+                        updated_at: Some(snapshot_ts),
+                        last_event_ts: Some(snapshot_ts),
+                        extra,
+                    },
+                );
+                file.removed.remove(*vault_id);
+                changes.push(if present {
+                    Change::Corrected {
+                        vault_id: (*vault_id).to_string(),
+                        subscription: sub.id.clone(),
+                    }
+                } else {
+                    Change::Granted {
+                        vault_id: (*vault_id).to_string(),
+                        subscription: sub.id.clone(),
+                        status: sub.status.clone(),
+                    }
+                });
+            }
+        }
+    }
+
+    let stale: Vec<(String, String, bool)> = file
+        .vaults
+        .iter()
+        .filter(|(vault_id, _)| !entitled.contains_key(vault_id.as_str()))
+        .filter_map(|(vault_id, e)| {
+            // No Stripe bookkeeping = an operator comp. Not ours to revoke.
+            let subscription = e.stripe_subscription.clone()?;
+            let fresher = e.last_event_ts.is_some_and(|ts| ts > snapshot_ts);
+            Some((vault_id.clone(), subscription, fresher))
+        })
+        .collect();
+    for (vault_id, subscription, fresher) in stale {
+        if fresher {
+            changes.push(Change::Skipped { vault_id });
+            continue;
+        }
+        file.vaults.remove(&vault_id);
+        // Tombstone at the snapshot: a straggling older `active` delivery
+        // must not resurrect what Stripe no longer has.
+        file.removed.insert(vault_id.clone(), snapshot_ts);
+        changes.push(Change::Revoked {
+            vault_id,
+            subscription,
+        });
+    }
+    changes
+}
+
 /// Locked read-modify-write around the file. One store per process; the
 /// mutex serializes concurrent webhook deliveries.
 pub struct EntStore {
@@ -210,6 +392,26 @@ impl EntStore {
             self.persist(&file)?;
         }
         Ok(changed)
+    }
+
+    /// The recovery path: diff the file against Stripe's live list and
+    /// (when `apply`) write the result. `apply = false` is a dry run —
+    /// same diff, nothing persisted. Same lock, so a webhook landing
+    /// mid-run either precedes the load or follows the write.
+    pub fn reconcile(
+        &self,
+        live: &[crate::stripe::Subscription],
+        pro_quota: u64,
+        snapshot_ts: i64,
+        apply: bool,
+    ) -> io::Result<Vec<Change>> {
+        let _guard = self.lock.lock().unwrap();
+        let mut file = self.load()?;
+        let changes = reconcile(&mut file, live, pro_quota, snapshot_ts);
+        if apply && changes.iter().any(Change::writes) {
+            self.persist(&file)?;
+        }
+        Ok(changes)
     }
 }
 
@@ -403,6 +605,202 @@ mod tests {
                 "file bytes untouched"
             );
         }
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    // ---- reconcile (mon-m3): Stripe is the record, the file is the cache
+
+    fn live_sub(id: &str, status: &str, vault_id: &str) -> crate::stripe::Subscription {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "customer": format!("cus_{id}"), "status": status,
+            "metadata": { "vault_id": vault_id },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn reconcile_grants_missed_payments_and_revokes_dead_subscriptions() {
+        let missed = "a1".repeat(16);
+        let dead = "b2".repeat(16);
+        let mut file = EntFile::fresh();
+        // The file believes `dead` is Pro (its cancellation webhook never
+        // arrived); it has never heard of `missed`.
+        file.vaults.insert(
+            dead.clone(),
+            Entitlement {
+                quota_bytes: GIB,
+                tier: Some("pro".into()),
+                stripe_customer: Some("cus_old".into()),
+                stripe_subscription: Some("sub_old".into()),
+                status: Some("active".into()),
+                updated_at: Some(1),
+                last_event_ts: Some(1),
+                extra: serde_json::Map::new(),
+            },
+        );
+
+        let live = vec![live_sub("sub_new", "active", &missed)];
+        let changes = reconcile(&mut file, &live, GIB, 500);
+
+        assert_eq!(
+            changes,
+            vec![
+                Change::Granted {
+                    vault_id: missed.clone(),
+                    subscription: "sub_new".into(),
+                    status: "active".into()
+                },
+                Change::Revoked {
+                    vault_id: dead.clone(),
+                    subscription: "sub_old".into()
+                },
+            ]
+        );
+        assert_eq!(file.vaults[&missed].quota_bytes, GIB);
+        assert_eq!(file.vaults[&missed].last_event_ts, Some(500));
+        assert!(!file.vaults.contains_key(&dead));
+        assert_eq!(
+            file.removed.get(&dead),
+            Some(&500),
+            "a revoke leaves the same tombstone a deleted webhook would"
+        );
+
+        // Running it twice must be a no-op — the diff is the whole point.
+        assert!(reconcile(&mut file, &live, GIB, 600).is_empty());
+    }
+
+    #[test]
+    fn reconcile_corrects_stale_entries_and_prunes_their_tombstone() {
+        let vid = "c3".repeat(16);
+        let mut file = EntFile::fresh();
+        file.removed.insert(vid.clone(), 10);
+        file.vaults.insert(
+            vid.clone(),
+            Entitlement {
+                quota_bytes: 42, // an old Pro quota, since raised
+                tier: Some("pro".into()),
+                stripe_customer: Some("cus_1".into()),
+                stripe_subscription: Some("sub_1".into()),
+                status: Some("active".into()),
+                updated_at: Some(1),
+                last_event_ts: Some(1),
+                extra: serde_json::Map::new(),
+            },
+        );
+
+        // Same vault, resubscribed under a new id and now past_due (which
+        // still entitles — Stripe is dunning, the customer is not cut off).
+        let live = vec![live_sub("sub_2", "past_due", &vid)];
+        let changes = reconcile(&mut file, &live, GIB, 500);
+
+        assert_eq!(
+            changes,
+            vec![Change::Corrected {
+                vault_id: vid.clone(),
+                subscription: "sub_2".into()
+            }]
+        );
+        let ent = &file.vaults[&vid];
+        assert_eq!(ent.quota_bytes, GIB);
+        assert_eq!(ent.stripe_subscription.as_deref(), Some("sub_2"));
+        assert_eq!(ent.status.as_deref(), Some("past_due"));
+        assert!(!file.removed.contains_key(&vid));
+    }
+
+    #[test]
+    fn reconcile_never_touches_operator_comps() {
+        let comp = "d4".repeat(16);
+        let raw = format!(
+            r#"{{"version":1,"vaults":{{"{comp}":{{"quota_bytes":536870912,"why":"friend"}}}}}}"#
+        );
+        let mut file: EntFile = serde_json::from_str(&raw).unwrap();
+
+        // Stripe knows nothing about this vault, and must not be allowed to
+        // conclude anything about it.
+        assert!(reconcile(&mut file, &[], GIB, 500).is_empty());
+        assert_eq!(file.vaults[&comp].quota_bytes, 536_870_912);
+        assert!(serde_json::to_string(&file)
+            .unwrap()
+            .contains(r#""why":"friend""#));
+    }
+
+    #[test]
+    fn reconcile_yields_to_a_webhook_that_landed_mid_run() {
+        let fresher = "e5".repeat(16);
+        let stale_grant = "f6".repeat(16);
+        let mut file = EntFile::fresh();
+        // Both entries were written by webhooks AFTER our Stripe snapshot.
+        for (vid, sub) in [(&fresher, "sub_f"), (&stale_grant, "sub_s")] {
+            file.vaults.insert(
+                vid.clone(),
+                Entitlement {
+                    quota_bytes: 7,
+                    tier: Some("pro".into()),
+                    stripe_customer: Some("cus_1".into()),
+                    stripe_subscription: Some(sub.to_string()),
+                    status: Some("active".into()),
+                    updated_at: Some(900),
+                    last_event_ts: Some(900),
+                    extra: serde_json::Map::new(),
+                },
+            );
+        }
+
+        // Our snapshot (ts 500) says `fresher` should be corrected and
+        // `stale_grant` revoked — both must be left alone instead.
+        let live = vec![live_sub("sub_other", "active", &fresher)];
+        let changes = reconcile(&mut file, &live, GIB, 500);
+
+        assert_eq!(
+            changes,
+            vec![
+                Change::Skipped {
+                    vault_id: fresher.clone()
+                },
+                Change::Skipped {
+                    vault_id: stale_grant.clone()
+                },
+            ]
+        );
+        assert_eq!(file.vaults[&fresher].quota_bytes, 7, "webhook state kept");
+        assert!(file.vaults.contains_key(&stale_grant));
+        assert!(changes.iter().all(|c| !c.writes()));
+    }
+
+    #[test]
+    fn reconcile_ignores_foreign_and_non_entitling_subscriptions() {
+        let vid = "a2".repeat(16);
+        let mut file = EntFile::fresh();
+        let live = vec![
+            // Someone else's product — no vault_id at all.
+            serde_json::from_value(serde_json::json!({
+                "id": "sub_x", "customer": "cus_x", "status": "active", "metadata": {},
+            }))
+            .unwrap(),
+            live_sub("sub_bad", "active", "../../etc/passwd"),
+            // Statuses that do not entitle (same allowlist as the webhooks).
+            live_sub("sub_unpaid", "unpaid", &vid),
+            live_sub("sub_incomplete", "incomplete", &vid),
+        ];
+        assert!(reconcile(&mut file, &live, GIB, 500).is_empty());
+        assert!(file.vaults.is_empty());
+    }
+
+    #[test]
+    fn store_reconcile_dry_run_writes_nothing() {
+        let path = temp_path("dryrun");
+        let store = EntStore::new(path.clone());
+        let vid = "b3".repeat(16);
+        let live = vec![live_sub("sub_1", "active", &vid)];
+
+        let changes = store.reconcile(&live, GIB, 500, false).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(!path.exists(), "a dry run creates nothing");
+
+        let changes = store.reconcile(&live, GIB, 500, true).unwrap();
+        assert_eq!(changes.len(), 1);
+        let written: EntFile = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written.vaults[&vid].quota_bytes, GIB);
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

@@ -280,9 +280,64 @@ async fn webhook(
     }
 }
 
+/// Disaster recovery: Stripe is the record of who paid, `entitlements.json`
+/// is only our cache of it. Rebuild the cache from the record — after a lost
+/// volume, a webhook outage, or a hand-edit gone wrong. Dry by default.
+fn reconcile_main(config: Config, apply: bool) -> Result<(), String> {
+    // Taken BEFORE the Stripe read so a webhook that lands during the run
+    // still outranks what we are about to write.
+    let snapshot_ts = unix_now();
+    let state = AppState::new(config);
+    let live = stripe::list_subscriptions(&state.agent, &state.config)?;
+    let changes = state
+        .store
+        .reconcile(&live, state.config.pro_quota, snapshot_ts, apply)
+        .map_err(|e| format!("entitlements: {e}"))?;
+
+    println!(
+        "stripe: {} live subscription(s); entitlements: {}",
+        live.len(),
+        state.config.entitlements_path.display()
+    );
+    for change in &changes {
+        println!("  {change}");
+    }
+    let writes = changes.iter().filter(|c| c.writes()).count();
+    match (writes, apply) {
+        (0, _) => println!("in sync — nothing to do"),
+        (n, true) => println!("applied {n} change(s)"),
+        (n, false) => println!("dry run: {n} change(s) NOT written — re-run with --apply"),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_target(false).init();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flags: Vec<&str> = args.iter().map(String::as_str).collect();
+    match flags.as_slice() {
+        [] => {}
+        ["--reconcile"] | ["--reconcile", "--dry-run"] | ["--reconcile", "--apply"] => {
+            let apply = flags.contains(&"--apply");
+            // Blocking HTTP + fsync, and nothing else runs in this mode.
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || reconcile_main(Config::from_env(), apply))
+                    .await
+                    .expect("reconcile task panicked")
+            {
+                eprintln!("reconcile failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {
+            eprintln!("usage: tacitus-billing [--reconcile [--apply]]");
+            std::process::exit(2);
+        }
+    }
+
     let config = Config::from_env();
     let bind = config.bind.clone();
     let state = Arc::new(AppState::new(config));
@@ -375,6 +430,63 @@ mod tests {
         }
         let router = Router::new()
             .route("/v1/checkout/sessions", post(handler))
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{addr}"), fake)
+    }
+
+    /// In-process fake of `GET /v1/subscriptions`, paginated the way Stripe
+    /// paginates: `starting_after` is the last id of the previous page.
+    /// Records every (authorization, query) it was called with.
+    struct FakeList {
+        pages: Vec<Vec<serde_json::Value>>,
+        seen: Mutex<Vec<(String, String)>>,
+    }
+
+    async fn spawn_fake_stripe_list(pages: Vec<Vec<serde_json::Value>>) -> (String, Arc<FakeList>) {
+        let fake = Arc::new(FakeList {
+            pages,
+            seen: Mutex::new(Vec::new()),
+        });
+        async fn handler(
+            State(fake): State<Arc<FakeList>>,
+            headers: HeaderMap,
+            axum::extract::RawQuery(query): axum::extract::RawQuery,
+        ) -> (StatusCode, String) {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let query = query.unwrap_or_default();
+            fake.seen.lock().unwrap().push((auth, query.clone()));
+            // Which page: the one AFTER the page ending in starting_after.
+            let index = match query
+                .split('&')
+                .find_map(|p| p.strip_prefix("starting_after="))
+            {
+                None => 0,
+                Some(cursor) => fake
+                    .pages
+                    .iter()
+                    .position(|page| page.last().and_then(|s| s["id"].as_str()) == Some(cursor))
+                    .map(|i| i + 1)
+                    .unwrap_or(fake.pages.len()),
+            };
+            let data = fake.pages.get(index).cloned().unwrap_or_default();
+            let body = serde_json::json!({
+                "object": "list",
+                "data": data,
+                "has_more": index + 1 < fake.pages.len(),
+            });
+            (StatusCode::OK, body.to_string())
+        }
+        let router = Router::new()
+            .route("/v1/subscriptions", get(handler))
             .with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -603,6 +715,77 @@ mod tests {
         assert_eq!(post_webhook(url, Some(sig), body).await, 200);
         let second = std::fs::read(&ent).unwrap();
         assert_eq!(first, second, "replay leaves the file byte-identical");
+        std::fs::remove_dir_all(ent.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn list_subscriptions_walks_every_page() {
+        fn sub(id: &str, vault_id: &str) -> serde_json::Value {
+            serde_json::json!({
+                "id": id, "customer": "cus_1", "status": "active",
+                "metadata": { "vault_id": vault_id },
+            })
+        }
+        let a = "a1".repeat(16);
+        let b = "b2".repeat(16);
+        let (stripe_url, fake) =
+            spawn_fake_stripe_list(vec![vec![sub("sub_1", &a)], vec![sub("sub_2", &b)]]).await;
+        let config = test_config(temp_ent_path("list"), &stripe_url);
+
+        let subs =
+            tokio::task::spawn_blocking(move || stripe::list_subscriptions(&test_agent(), &config))
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            subs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["sub_1", "sub_2"],
+            "both pages, in order"
+        );
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one request per page");
+        assert!(seen[0].0.starts_with("Bearer sk_test"));
+        assert!(
+            !seen[0].1.contains("starting_after"),
+            "first page has no cursor"
+        );
+        assert!(
+            seen[1].1.contains("starting_after=sub_1"),
+            "second page resumes after the last id: {}",
+            seen[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_end_to_end_repairs_a_lost_entitlements_file() {
+        let paid = "c3".repeat(16);
+        let (stripe_url, _fake) = spawn_fake_stripe_list(vec![vec![serde_json::json!({
+            "id": "sub_live", "customer": "cus_1", "status": "active",
+            "metadata": { "vault_id": paid },
+        })]])
+        .await;
+        let ent = temp_ent_path("reconcile-e2e");
+        let config = test_config(ent.clone(), &stripe_url);
+        let quota = config.pro_quota;
+
+        // The volume was lost: no file at all, one paying customer.
+        let dry = config;
+        let ent_for_dry = ent.clone();
+        tokio::task::spawn_blocking(move || reconcile_main(dry, false).unwrap())
+            .await
+            .unwrap();
+        assert!(!ent_for_dry.exists(), "a dry run writes nothing");
+
+        let apply_config = test_config(ent.clone(), &stripe_url);
+        tokio::task::spawn_blocking(move || reconcile_main(apply_config, true).unwrap())
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(&ent).unwrap();
+        let file: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(file["version"], 1);
+        assert_eq!(file["vaults"][&paid]["quota_bytes"], quota);
+        assert_eq!(file["vaults"][&paid]["tier"], "pro");
         std::fs::remove_dir_all(ent.parent().unwrap()).ok();
     }
 }

@@ -181,6 +181,69 @@ pub fn create_checkout_session(
         .ok_or_else(|| "checkout session has no url".into())
 }
 
+/// One page of `GET /v1/subscriptions`.
+#[derive(Debug, Deserialize)]
+struct SubscriptionPage {
+    data: Vec<Subscription>,
+    #[serde(default)]
+    has_more: bool,
+}
+
+/// Stripe's page cap for list endpoints.
+const LIST_PAGE_SIZE: usize = 100;
+
+/// Refuse to walk forever if Stripe ever answers `has_more` without moving:
+/// 100 pages is 10k subscriptions, far past anything this business has.
+const LIST_MAX_PAGES: usize = 100;
+
+/// Every subscription Stripe still tracks, newest first — the default list
+/// excludes canceled ones, which is exactly the set that can entitle a
+/// vault. Blocking (ureq); the caller is a CLI, not the server loop.
+///
+/// This is the disaster-recovery input: Stripe, not our file, is the record
+/// of who paid.
+pub fn list_subscriptions(
+    agent: &ureq::Agent,
+    config: &Config,
+) -> Result<Vec<Subscription>, String> {
+    let mut all: Vec<Subscription> = Vec::new();
+    let mut starting_after: Option<String> = None;
+    for _ in 0..LIST_MAX_PAGES {
+        let limit = LIST_PAGE_SIZE.to_string();
+        let mut query: Vec<(&str, &str)> = vec![("limit", &limit)];
+        if let Some(cursor) = &starting_after {
+            query.push(("starting_after", cursor));
+        }
+        let mut resp = agent
+            .get(format!("{}/v1/subscriptions", config.stripe_url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", config.stripe_secret_key),
+            )
+            .query_pairs(query)
+            .call()
+            .map_err(|e| format!("stripe unreachable: {e}"))?;
+        if !resp.status().is_success() {
+            let body = resp.body_mut().read_to_string().unwrap_or_default();
+            return Err(format!("stripe {}: {body}", resp.status()));
+        }
+        let page: SubscriptionPage = resp
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("stripe returned malformed JSON: {e}"))?;
+        let last_id = page.data.last().map(|sub| sub.id.clone());
+        all.extend(page.data);
+        match (page.has_more, last_id) {
+            (true, Some(id)) => starting_after = Some(id),
+            // has_more with an empty page would loop forever — stop.
+            _ => return Ok(all),
+        }
+    }
+    Err(format!(
+        "stripe paginated past {LIST_MAX_PAGES} pages — refusing to keep walking"
+    ))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
