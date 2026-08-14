@@ -147,6 +147,85 @@ pub async fn run_once(engine: &mut SyncEngine, relay_url: &str) -> Result<RunRep
     Ok(report)
 }
 
+/// What the relay says about a vault the instant we say hello.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RelayStatus {
+    pub latest_seq: u64,
+    /// Log size on disk; 0 from a pre-0.22 relay means "unknown", not empty.
+    pub log_bytes: u64,
+    /// Effective quota; 0 from a pre-0.24 relay means "no quota info" (a
+    /// real quota is never 0).
+    pub quota_bytes: u64,
+}
+
+/// Ask the relay for this vault's headline numbers and hang up at the
+/// Welcome. Deliberately read-only: no frame reaches the engine, so no
+/// cursor moves and nothing is written to the vault — `sync status` is a
+/// question, not a sync pass.
+pub async fn probe(engine: &SyncEngine, relay_url: &str) -> Result<RelayStatus, SyncError> {
+    let ws = connect_ws(relay_url).await?;
+    let (mut sink, mut stream) = ws.split();
+
+    let hello = serde_json::to_string(&engine.hello()).map_err(net_err)?;
+    sink.send(Message::Text(hello.into()))
+        .await
+        .map_err(net_err)?;
+
+    let status = loop {
+        let frame = tokio::time::timeout(QUIET_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| SyncError {
+                code: "NETWORK",
+                reason: "relay never said hello back".into(),
+            })?
+            .ok_or_else(|| SyncError {
+                code: "NETWORK",
+                reason: "relay closed the connection before welcome".into(),
+            })?
+            .map_err(net_err)?;
+
+        let text = match frame {
+            Message::Text(text) => text,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => {
+                return Err(SyncError {
+                    code: "NETWORK",
+                    reason: "relay closed the connection before welcome".into(),
+                })
+            }
+            _ => continue,
+        };
+        match parse_server_msg(&text) {
+            Ok(Some(ServerMsg::Welcome {
+                latest_seq,
+                log_bytes,
+                quota_bytes,
+                ..
+            })) => {
+                break RelayStatus {
+                    latest_seq,
+                    log_bytes,
+                    quota_bytes,
+                }
+            }
+            // A refusal (bad token, unknown vault) is the answer to report.
+            Ok(Some(ServerMsg::Err { code, msg })) => {
+                return Err(SyncError {
+                    code: "RELAY",
+                    reason: format!("{code}: {msg}"),
+                })
+            }
+            // Backlog frames can't precede the welcome, but skipping them
+            // costs nothing and keeps the probe honest if that ever changes.
+            Ok(_) => continue,
+            Err(e) => return Err(net_err(e)),
+        }
+    };
+
+    let _ = sink.send(Message::Close(None)).await;
+    Ok(status)
+}
+
 /// Force one compaction pass: connect, catch up (so the snapshot honestly
 /// covers the whole log), offer the snapshot, await the relay's confirm.
 /// Returns the covered seq — or 0 when the log is already empty.

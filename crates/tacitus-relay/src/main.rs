@@ -1295,6 +1295,39 @@ mod tests {
         assert_eq!(b2.last_seq(), cursor);
     }
 
+    /// `sync status` asks the relay how full the vault is (mon-m3). The
+    /// probe must report the same numbers the welcome carries — and must
+    /// leave the client exactly where it found it: a status read that
+    /// advanced the cursor would silently skip content.
+    #[tokio::test]
+    async fn probe_reports_quota_without_moving_the_client() {
+        use tacitus_sync::{client, SyncEngine, VaultCode};
+        let url = spawn_relay_with(temp_dir("probe-data"), |c| c.default_quota_bytes = 4096).await;
+
+        let va = temp_dir("probe-va");
+        std::fs::write(va.join("note.md"), "measured\n").unwrap();
+        let code = VaultCode::generate();
+        let mut a = SyncEngine::open(&va, &code).unwrap();
+        client::run_once(&mut a, &url).await.unwrap();
+
+        // A second device that has never synced: its cursor is 0 and the
+        // probe must keep it there while still seeing the relay's tip.
+        let vb = temp_dir("probe-vb");
+        let b = SyncEngine::open(&vb, &code).unwrap();
+        let status = client::probe(&b, &url).await.unwrap();
+
+        assert_eq!(status.quota_bytes, 4096);
+        assert!(
+            status.log_bytes > 0 && status.log_bytes < 4096,
+            "one pushed note sits under the quota: {status:?}"
+        );
+        // A pushes and acks rather than replaying its own echo, so the tip
+        // is the relay's count, not A's cursor.
+        assert!(status.latest_seq >= 1, "the pushed update is the tip");
+        assert_eq!(b.last_seq(), 0, "a probe applies nothing");
+        assert!(!vb.join("note.md").exists(), "a probe writes no files");
+    }
+
     #[tokio::test]
     async fn e2e_two_vaults_converge_over_in_process_relay() {
         use tacitus_core::vault::{NoteWriter, PermissionScope};

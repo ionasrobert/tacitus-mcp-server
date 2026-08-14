@@ -133,7 +133,8 @@ public API, with permission scoping, versioning, and audit built in.
   needs an Ollama with embedding support). Vectors cached in `.tacitus/vectors/`;
   falls back to the deterministic hashing embedder when unavailable.
 - [docs/SYNC.md](./docs/SYNC.md) — **Sync (beta)**: E2E-encrypted CRDT sync
-  between devices (`tacitus-mcp sync init`)
+  between devices (`tacitus-mcp sync init`; `sync status` shows how much of
+  the relay quota a vault uses)
 - [docs/DATA_FORMAT.md](./docs/DATA_FORMAT.md) — the on-disk format
   (`.tacitus/` internals, stable ids, note conventions)
 - [examples/](./examples/) — three complete plugins (Python read-only

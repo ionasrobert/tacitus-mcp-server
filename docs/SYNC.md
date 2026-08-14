@@ -22,6 +22,12 @@ tacitus-mcp sync run --live --vault ~/vault
 
 # force a relay-log compaction now (live sessions also do this on their own)
 tacitus-mcp sync compact --vault ~/vault
+
+# how full is this vault on the relay, and what is its quota?
+tacitus-mcp sync status --vault ~/vault
+
+# the checkout link for this vault's Pro quota (--open launches a browser)
+tacitus-mcp sync upgrade --vault ~/vault --plan yearly
 ```
 
 `--live` holds a single WebSocket open instead of a pass every tick: remote
@@ -198,6 +204,15 @@ is refused — `err {code:"quota_exceeded"}` to clients that advertised the
 cap, the legacy `err {code:"log_full"}` to everyone else (an unknown err
 code is fatal to old clients, so the new one is never sent unasked). The
 refusal consumes no sequence number and the connection survives.
+Client side, the same numbers are readable without syncing: `sync status`
+opens a connection, reads the welcome, and hangs up — no frame reaches the
+engine, so the cursor never moves and nothing is written. It prints
+`storage: <used> of <quota> (N%)`, and past 80% it prints the checkout link
+for that vault (`sync upgrade` prints it on demand). Those links appear
+**only** for `sync.tacitus.md` or when `TACITUS_BILLING_URL` names an
+operator's own billing sidecar: a self-hosted relay has no quota to sell and
+never advertises one.
+
 Compaction is deliberately **exempt** from the quota — it is the cure —
 only the snapshot itself must fit (`compact_too_large` otherwise, already
 advisory). A live client answers the first refusal by emitting
