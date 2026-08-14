@@ -2,9 +2,12 @@
 
 **Long-term memory for your AI agents — local-first, with provenance.**
 
+Site: **[tacitus.md](https://tacitus.md)** · MIT · no telemetry, no account.
+
 > **This is the core server (16 tools).** The flagship **native binary**
-> (24 tools — adds `properties_query`, templates, tasks, `rename_note`,
-> `get_version` — zero runtime deps) ships for macOS/Linux/Windows via
+> (25 tools — adds `properties_query`, templates, tasks, `rename_note`,
+> `get_version`, plus end-to-end encrypted multi-device sync — with zero
+> runtime deps) ships for macOS/Linux/Windows via
 > [GitHub Releases](https://github.com/ionasrobert/tacitus-mcp-server/releases/latest):
 >
 > ```bash
@@ -82,6 +85,23 @@ model isn't available, it falls back to the deterministic embedder automatically
 
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.
+
+## Multi-device sync (native binary, beta)
+
+The native binary adds CRDT sync through a relay that stores **only
+ciphertext** — the vault code is the key, everything derives from it locally,
+and the relay learns exactly one thing: a 32-character vault id.
+
+```bash
+tacitus-mcp sync init --vault ~/vault     # prints the vault code
+tacitus-mcp sync run --live --vault ~/vault
+```
+
+Two devices with the same note open co-edit at keystroke level, still
+end-to-end encrypted. The relay is one MIT Rust crate with a Docker image —
+self-host it with no limits, or use the hosted one (free at 100 MB per vault).
+Protocol and threat model:
+[docs/SYNC.md](https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md).
 
 ## How it stores things
 
