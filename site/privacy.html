@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Tacitus</title>
+<meta name="description" content="What the Tacitus relay can and cannot see: ciphertext and an opaque vault id, nothing else. No accounts, no analytics, no telemetry.">
+<meta name="robots" content="index,follow">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Legal">
+      <a href="/terms.html">Terms</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/refunds.html">Cancellation &amp; refunds</a>
+      <a href="/">Home</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Privacy Policy</h1>
+    <p class="updated">Version 1.0 · in force from 14 August 2026</p>
+
+    <p class="lede">The short version: the software sends us nothing at all, and the hosted relay
+      receives ciphertext plus a 32-character identifier that means nothing outside your own
+      devices. There are no accounts, no analytics, and no telemetry — this is enforced by the
+      design, not by a promise, and the code is open for inspection.</p>
+
+    <div class="card">
+      <h3>Data controller</h3>
+      <dl>
+        <dt>Company</dt><dd>Docs Printing SRL</dd>
+        <dt>Fiscal code</dt><dd>RO22749955</dd>
+        <dt>Registered office</dt><dd>Str. Lacul Roșu 5, ap. 5, 400614 Cluj-Napoca, Romania</dd>
+        <dt>Email</dt><dd><a href="mailto:office@docsprinting.ro">office@docsprinting.ro</a></dd>
+      </dl>
+    </div>
+
+    <h2>1. The Tacitus software (local use)</h2>
+    <p>Run on its own, Tacitus reads and writes files in a folder you choose. It makes no network
+      requests of any kind, collects no usage statistics, and contains no telemetry or crash
+      reporting. If you never enable sync, we never learn that you exist.</p>
+
+    <h2>2. The hosted relay (sync.tacitus.md)</h2>
+    <p>When you enable sync against our relay, we process:</p>
+    <ul>
+      <li><strong>The vault id</strong> — 32 hexadecimal characters derived one-way from your vault
+        code on your device. It identifies the log; it reveals nothing about you or your notes and
+        cannot be reversed into the vault code.</li>
+      <li><strong>Encrypted update blobs</strong> — your notes, sealed with a key derived on your
+        devices. We cannot decrypt them. Note titles, paths, tags and memory contents are all
+        <em>inside</em> the ciphertext.</li>
+      <li><strong>Technical metadata</strong> we cannot avoid: the size and timestamp of each
+        update, the sequence number, and how many devices are connected to a vault. This is what
+        makes a log a log.</li>
+      <li><strong>Connection data</strong> — your IP address appears in the web-server access logs
+        in front of the relay, as it does for any website. These logs are kept for a short period
+        (currently up to 14 days) and then deleted.</li>
+    </ul>
+    <p>We do not profile, sell, share, or mine any of this. We do not have a mechanism to associate
+      a vault id with a person unless that vault has a Pro subscription, in which case Stripe holds
+      the billing identity — see section 4.</p>
+
+    <div class="note">
+      A relay operator can see that a vault exists, roughly how large it is, and when it is active.
+      A relay operator can withhold data. A relay operator can never read, forge, or splice your
+      content. The full threat model is published in
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md">docs/SYNC.md</a>.
+    </div>
+
+    <h2>3. Legal bases (GDPR art. 6)</h2>
+    <ul>
+      <li><strong>Performance of a contract</strong> — storing and forwarding your encrypted log is
+        the service you asked for.</li>
+      <li><strong>Legitimate interests</strong> — short-lived access logs, to keep the service
+        available and to investigate abuse.</li>
+      <li><strong>Legal obligation</strong> — accounting and tax records for paid subscriptions.</li>
+    </ul>
+
+    <h2>4. Processors we use</h2>
+    <ul>
+      <li><strong>Stripe Payments Europe, Ltd.</strong> (payments) — when you subscribe to Pro,
+        Stripe collects your email, payment details and any tax identifiers, and stores them under
+        <a href="https://stripe.com/privacy">its own privacy policy</a>. We receive from Stripe only
+        the subscription status and the vault id we sent it. We never receive card numbers.</li>
+      <li><strong>Hetzner Online GmbH</strong> — the server that runs the relay, in a German
+        data centre.</li>
+      <li><strong>Cloudflare, Inc.</strong> — DNS and reverse proxy in front of the relay. It sees
+        connection metadata and the same ciphertext we do.</li>
+    </ul>
+    <p>We use no analytics provider, no advertising network, and no third-party fonts or scripts on
+      this website. This site sets no cookies of its own; our proxy may set strictly necessary
+      security cookies.</p>
+
+    <h2>5. Retention</h2>
+    <ul>
+      <li><strong>Encrypted log:</strong> kept while the vault is in use. Your client compacts the
+        log by replacing old entries with a sealed snapshot; the replaced data is deleted from our
+        disks at that point. A vault with no activity for 12 months may be deleted in full.</li>
+      <li><strong>Access logs:</strong> up to 14 days.</li>
+      <li><strong>Billing records:</strong> as long as Romanian accounting law requires
+        (currently 10 years), held by us and by Stripe.</li>
+    </ul>
+
+    <h2>6. Your rights</h2>
+    <p>You have the rights of access, rectification, erasure, restriction, portability and objection
+      under the GDPR. Two practical notes, both consequences of the design rather than evasions:</p>
+    <ul>
+      <li>Your notes are already in your possession as plain files — portability is the default
+        state, not a request you have to make.</li>
+      <li>Because we hold no identity for a vault, we cannot verify that a vault id belongs to you.
+        We therefore act on requests concerning a vault only from someone who can demonstrate
+        control of it (for example, from the email that paid for its subscription, or by
+        performing an action on the vault we can observe).</li>
+    </ul>
+    <p>To delete a vault's stored log, write to
+      <a href="mailto:office@docsprinting.ro">office@docsprinting.ro</a> with the vault id. Requests
+      are answered within 30 days. You may also complain to the Romanian supervisory authority,
+      <a href="https://www.dataprotection.ro">ANSPDCP</a>, or to the authority where you live.</p>
+
+    <h2>7. International transfers</h2>
+    <p>The relay runs on servers in the European Union. Stripe and Cloudflare may process data
+      outside the EU under the European Commission's standard contractual clauses.</p>
+
+    <h2>8. Changes</h2>
+    <p>Any change is published here with a new version number and date; material changes are
+      announced on the site before they take effect.</p>
+
+    <div class="note">
+      That retention is enforced, not merely intended: the web server rotates its logs daily and
+      keeps 13 archives — the current day plus thirteen. Nothing older than 14 days survives.
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <a href="/">Home</a>
+      <a href="/terms.html">Terms</a>
+      <a href="/refunds.html">Cancellation &amp; refunds</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <span>Docs Printing SRL · CIF RO22749955</span>
+    </div>
+    <p class="motto">Sine ira et studio — recorded without anger or favor, encrypted without exception.</p>
+  </div>
+</footer>
+</body>
+</html>

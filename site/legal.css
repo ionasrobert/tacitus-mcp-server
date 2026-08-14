@@ -1,0 +1,75 @@
+/* Shared styling for the legal pages (terms, privacy, refunds).
+   Same tokens as index.html's inline <style> — kept in one file here
+   because three documents would otherwise carry three copies. */
+:root {
+  --paper: #FBFAF7;
+  --ink: #1B201D;
+  --graphite: #626A66;
+  --mist: #E8E4DA;
+  --panel: #FFFFFF;
+  --patina: #2F7A68;
+  --patina-deep: #1E5548;
+  --patina-wash: #EDF4F1;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --serif: Charter, Georgia, "Times New Roman", serif;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #131816;
+    --ink: #E9E7DF;
+    --graphite: #9AA39E;
+    --mist: #28312D;
+    --panel: #1A211E;
+    --patina: #5FB39E;
+    --patina-deep: #8ACDBB;
+    --patina-wash: #1C2723;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  line-height: 1.7;
+}
+a { color: var(--patina); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--patina-deep); }
+:focus-visible { outline: 2px solid var(--patina); outline-offset: 3px; border-radius: 2px; }
+code { font-family: var(--mono); font-size: .9em; }
+
+.wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem; }
+
+header { border-bottom: 1px solid var(--mist); }
+.nav { display: flex; align-items: baseline; gap: 1.5rem; padding: 1.1rem 0; font-family: var(--sans); font-size: .9rem; }
+.brand { font-family: var(--serif); font-size: 1.15rem; font-weight: 700; color: var(--ink); text-decoration: none; }
+.brand .seal { color: var(--patina); }
+.nav .links { margin-left: auto; display: flex; gap: 1.25rem; flex-wrap: wrap; }
+.nav .links a { color: var(--graphite); text-decoration: none; }
+.nav .links a:hover { color: var(--patina); }
+
+main { padding: 2.5rem 0 3rem; }
+h1 { font-size: 2rem; line-height: 1.2; letter-spacing: -.01em; }
+.updated { font-family: var(--sans); font-size: .85rem; color: var(--graphite); margin-top: .5rem; }
+h2 { font-size: 1.15rem; margin: 2.2rem 0 .6rem; letter-spacing: -.005em; }
+h3 { font-size: 1rem; font-family: var(--sans); margin: 1.4rem 0 .4rem; }
+p, ul, ol { margin-bottom: .9rem; }
+ul, ol { margin-left: 1.3rem; }
+li { margin-bottom: .35rem; }
+strong { font-weight: 700; }
+
+.lede { font-size: 1.1rem; color: var(--graphite); margin-top: 1rem; }
+.card {
+  background: var(--panel); border: 1px solid var(--mist); border-radius: 10px;
+  padding: 1rem 1.15rem; margin: 1.2rem 0; font-family: var(--sans); font-size: .92rem;
+}
+.card h3 { margin-top: 0; }
+.card dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .9rem; }
+.card dt { color: var(--graphite); }
+.note { background: var(--patina-wash); border-left: 3px solid var(--patina); padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; }
+.todo { background: #FFF3CD; color: #5A4300; border-left: 3px solid #B8860B; padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-family: var(--sans); font-size: .9rem; }
+
+footer { border-top: 1px solid var(--mist); padding: 2rem 0 3rem; font-family: var(--sans); font-size: .84rem; color: var(--graphite); }
+footer .cols { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+footer .motto { margin-top: 1.4rem; font-family: var(--serif); font-style: italic; }

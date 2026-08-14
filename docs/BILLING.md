@@ -8,7 +8,13 @@ that is all the relay ever learns, so the privacy story survives billing.
 browser ── GET /billing/checkout?vault_id&plan ──> tacitus-billing ── 303 ──> Stripe Checkout
 Stripe  ── POST /billing/webhook (signed) ──────> tacitus-billing ── writes ──> entitlements.json
 relay   ── hot-reloads entitlements.json on its own (mon-m1) — the two services share only that file
+operator ─ tacitus-billing --reconcile ────────> reads Stripe's live list ── repairs ──> entitlements.json
 ```
+
+The client half of the funnel lives in `tacitus-mcp sync`: `status` prints
+`storage: <used> of <quota>` and, past 80%, the checkout link for that
+vault; `upgrade [--plan] [--open]` prints or opens it on demand. Both stay
+silent on self-hosted relays (see docs/SYNC.md).
 
 ## Configuration
 
@@ -47,6 +53,52 @@ crash-loop is visible.
   entitlement. The relay ignores the field.
 - Delivery order is guarded by Stripe's `event.created` per vault
   (`last_event_ts`); webhook replays are byte-idempotent.
+
+## Reconcile — when webhooks and reality drift apart
+
+Stripe is the record of who paid; `entitlements.json` is only our cache of
+it. `--reconcile` rebuilds the cache from the record:
+
+```bash
+docker compose exec billing tacitus-billing --reconcile          # dry run
+docker compose exec billing tacitus-billing --reconcile --apply  # write it
+```
+
+It lists every subscription Stripe still tracks, keeps the ones whose
+status entitles (the same `active | trialing | past_due` allowlist the
+webhooks use) and whose metadata carries a valid `vault_id`, then prints a
+diff: `+` grant a vault Pro that the file missed, `~` correct a stale entry
+(old quota, resubscribed under a new id), `-` revoke Pro the file grants
+and Stripe no longer backs. Nothing is written without `--apply`.
+
+Two guarantees make it safe to run at any time, including while webhooks
+are landing:
+
+- **Comps are invisible to it.** An entry without `stripe_subscription` is
+  operator-granted and never revoked or rewritten.
+- **A live webhook always wins.** The run stamps everything it touches with
+  a timestamp taken *before* the Stripe read, and skips (`=`) any entry
+  whose `last_event_ts` is newer than that. A webhook that arrives mid-run
+  is fresher truth than our list, and it stays.
+
+Reach for it after: restoring the data volume from a backup, a webhook
+endpoint outage (Stripe gives up retrying after ~3 days), or any suspicion
+that a paying customer is not getting their quota. The dry run costs
+nothing — a monthly one is a cheap audit.
+
+## Self-serve cancellation (Stripe Customer Portal)
+
+Enable the **hosted** portal — Dashboard → Settings → Billing → Customer
+portal: turn on cancellation, plan switching, payment-method updates and
+invoice history, then copy the **login link**
+(`https://billing.stripe.com/p/login/…`) into `site/refunds.html`.
+
+Deliberately NOT a `/billing/portal?vault_id=` endpoint of our own: the
+vault id is an identifier, not a credential. It travels in checkout URLs
+and support emails, and anyone who learned one could cancel that vault's
+subscription. Stripe's hosted flow authenticates by emailing the customer a
+sign-in link, which is the only identity in this system that means
+anything — we hold none.
 
 ## Deploy (same box as the relay)
 
@@ -88,15 +140,33 @@ docker run -d --name tacitus-billing \
    `customer.subscription.created`, `customer.subscription.updated`,
    `customer.subscription.deleted`. Signing secret → `STRIPE_WEBHOOK_SECRET`.
 7. Settings → Checkout: enable customer receipt emails.
-8. Smoke test (Test mode): open
+8. Settings → Billing → Customer portal: enable it, allow cancellation and
+   plan switching, set the links to `https://tacitus.md/terms.html` and
+   `https://tacitus.md/privacy.html`, then paste the login link into
+   `site/refunds.html`.
+9. Settings → Business → public details: point "Terms of service" at
+   `https://tacitus.md/terms.html`, "Privacy policy" at
+   `/privacy.html`, "Refund policy" at `/refunds.html`. Stripe shows these
+   at checkout and asks for them at activation.
+10. Smoke test (Test mode): open
    `https://sync.tacitus.md/billing/checkout?vault_id=<32hex>&plan=monthly`,
    pay with card `4242 4242 4242 4242`, verify the vault appears in
    `entitlements.json` with the Pro quota; cancel in the dashboard and
    verify it disappears. Locally:
    `stripe listen --forward-to 127.0.0.1:8092/billing/webhook`.
 
+## The legal pages the payment flow depends on
+
+`site/terms.html`, `site/privacy.html` and `site/refunds.html` are part of
+the product, not decoration: Stripe asks for them at account activation and
+shows them at checkout, and EU distance-selling law requires the trader
+identification, the 14-day withdrawal notice and the ANPC/SOL routes they
+carry. They ship with `[COMPLETEAZĂ: …]` markers for the company details
+that only the operator has (trade register number, registered office,
+hosting provider, the portal login link) — grep for that string before
+deploying the site.
+
 ## Out of scope (follow-ups)
 
-Stripe Customer Portal endpoint (self-serve cancellation), per-user vault
-counts, dunning/refund emails, the site's pricing section (launch
-milestone), the Teams tier.
+Per-user vault counts, dunning/refund emails, a status page, the Teams
+tier.

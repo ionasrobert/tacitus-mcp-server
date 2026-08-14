@@ -369,13 +369,18 @@ vault_id   = HKDF(root, <span class="dim">"tacitus/v1/vault-id"</span>)    <span
           </ul>
           <form class="pro-form" action="https://sync.tacitus.md/billing/checkout" method="get">
             <input name="vault_id" pattern="[0-9a-f]{32}" required
-                   placeholder="your vault id — run: tacitus-mcp sync status"
+                   placeholder="your vault id — run: tacitus-mcp sync upgrade"
                    aria-label="Vault id (32 lowercase hex characters)">
             <button name="plan" value="monthly">Go Pro — €5/mo</button>
             <button class="alt" name="plan" value="yearly">€48/yr</button>
           </form>
           <p class="plan-note">The vault id is safe to share with us: it's derived one-way
-            from your vault code and decrypts nothing.</p>
+            from your vault code and decrypts nothing. Or skip the copy-paste —
+            <code>tacitus-mcp sync upgrade --open</code> opens this checkout for the vault
+            you're standing in. Prices in EUR, VAT included where it applies; by subscribing
+            you accept the <a href="/terms.html">terms</a>.</p>
+          <p class="plan-note">Already Pro? <a href="/refunds.html">Manage or cancel your
+            subscription</a> — self-serve, any time.</p>
         </div>
       </div>
     </div>
@@ -431,8 +436,15 @@ curl --proto '=https' --tlsv1.2 -LsSf \
       <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md">API reference</a>
       <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/PLUGINS.md">Plugins</a>
       <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md">Sync</a>
+      <a href="/terms.html">Terms</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/refunds.html">Cancellation &amp; refunds</a>
       <span>MIT © Robert Ionas</span>
     </div>
+    <p style="margin-top:1rem">Hosted sync is operated by <b>Docs Printing SRL</b>, CIF RO22749955,
+      Romania · <a href="mailto:office@docsprinting.ro">office@docsprinting.ro</a> ·
+      <a href="https://anpc.ro">ANPC</a> ·
+      <a href="https://ec.europa.eu/consumers/odr">SOL</a></p>
     <p class="motto">Sine ira et studio — recorded without anger or favor, encrypted without exception.</p>
   </div>
 </footer>

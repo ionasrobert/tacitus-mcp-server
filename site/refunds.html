@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cancellation &amp; Refunds — Tacitus</title>
+<meta name="description" content="How to cancel Tacitus Sync Pro, the 14-day withdrawal right, and exactly what happens to a vault when Pro ends.">
+<meta name="robots" content="index,follow">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Legal">
+      <a href="/terms.html">Terms</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/refunds.html">Cancellation &amp; refunds</a>
+      <a href="/">Home</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Cancellation &amp; Refunds</h1>
+    <p class="updated">Version 1.0 · in force from 14 August 2026 · part of the <a href="/terms.html">Terms of Service</a></p>
+
+    <p class="lede">Cancel whenever you like, from Stripe, without asking us. Within the first
+      14 days you get your money back in full, no reason required.</p>
+
+    <h2>How to cancel</h2>
+    <ol>
+      <li>Open the <a href="https://billing.stripe.com/p/login/8x23cu6Z811He8Pe4Jg7e00">subscription
+        portal</a> and enter the email address you used at checkout. Stripe sends you a sign-in
+        link; from there you can cancel, change the payment card, switch between monthly and
+        yearly, and download your invoices.</li>
+      <li>Or write to <a href="mailto:office@docsprinting.ro">office@docsprinting.ro</a> from that
+        same email address and we will cancel it for you.</li>
+    </ol>
+    <p>Cancelling stops the next renewal. Pro stays active for the period you have already paid
+      for; there is no partial refund for the remainder of a period, except under the withdrawal
+      right below.</p>
+
+    <h2>The 14-day withdrawal right</h2>
+    <p>If you are a consumer in the European Union, you may withdraw from the contract within
+      <strong>14 days</strong> without giving any reason (Directive 2011/83/EU; in Romania,
+      OUG 34/2014). In practice we apply it generously:</p>
+    <ul>
+      <li><strong>First payment:</strong> a full refund if you ask within 14 days of subscribing.</li>
+      <li><strong>Annual renewals:</strong> a full refund if you ask within 14 days of the renewal
+        charge — we would rather refund a renewal you did not want than keep it.</li>
+      <li>Send the request to <a href="mailto:office@docsprinting.ro">office@docsprinting.ro</a>
+        with the email address that paid, or use the portal and tell us. No form is required; a
+        plain sentence is enough.</li>
+    </ul>
+    <p>Refunds are returned to the original payment method, normally within 5–10 working days once
+      Stripe has processed them. Because the service starts immediately at your request, we may
+      retain a proportionate amount for the days used before withdrawal, but as a matter of
+      practice we do not.</p>
+
+    <h2>What happens to your vault when Pro ends</h2>
+    <p>Nothing is deleted, and nothing surprising happens:</p>
+    <ul>
+      <li>Your notes are plain Markdown files on your own devices. They are untouched by anything
+        that happens to a subscription.</li>
+      <li>The vault returns to the <strong>free 100 MB quota</strong> on the hosted relay. Its
+        existing encrypted log stays where it is.</li>
+      <li>If that log is <em>larger</em> than the free quota, the relay stops accepting new updates
+        for it and says so. Your client's answer is to compact — it seals the current state into a
+        fresh snapshot and the relay drops everything beneath it, which almost always brings a vault
+        back under the free quota. Compaction is always permitted, even over quota, precisely
+        because it is the cure.</li>
+      <li>If it still does not fit, you can shrink the vault, keep syncing a smaller one, run your
+        own relay (no quotas at all), or resubscribe. In no case do we delete your log without
+        telling you.</li>
+    </ul>
+
+    <h2>If something goes wrong</h2>
+    <p>Write to <a href="mailto:office@docsprinting.ro">office@docsprinting.ro</a>. If we cannot
+      settle it between us, consumers in Romania may turn to the National Authority for Consumer
+      Protection (<a href="https://anpc.ro">ANPC</a>), its alternative dispute resolution service
+      (<a href="https://anpc.ro/ce-este-sal/">SAL</a>), or the European Commission's online dispute
+      resolution platform (<a href="https://ec.europa.eu/consumers/odr">SOL/ODR</a>).</p>
+
+    <div class="note">
+      Cancelling is genuinely self-serve: the portal above is Stripe's own, it authenticates you
+      by emailing a sign-in link, and it cancels at the end of the period you already paid for.
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <a href="/">Home</a>
+      <a href="/terms.html">Terms</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <span>Docs Printing SRL · CIF RO22749955</span>
+    </div>
+    <p class="motto">Sine ira et studio — recorded without anger or favor, encrypted without exception.</p>
+  </div>
+</footer>
+</body>
+</html>
