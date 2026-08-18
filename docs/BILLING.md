@@ -122,6 +122,23 @@ docker run -d --name tacitus-billing \
 - If the server clock drifts more than 5 minutes, webhook signatures are
   rejected with a warn log showing the delta — check NTP, not the secret.
 
+## Backups and liveness
+
+- `deploy/backup.sh` tars `/var/lib/tacitus-relay` (the vault logs **and**
+  `entitlements.json`) into `/var/backups/tacitus`, keeps 14, and writes
+  through a `.part` file so an interrupted run can't leave a truncated
+  archive that looks valid. Daily from cron is enough — the data is tiny.
+  `--reconcile` rebuilds paid entitlements from Stripe, so the archive is
+  what protects the two things Stripe has never heard of: comp entries and
+  the encrypted logs themselves.
+- Liveness worth alerting on, in the order it hurts: the relay
+  (`/healthz`), billing on its loopback port (a crash-loop from a missing
+  secret looks exactly like this), and billing **through nginx** — that
+  last path is the one Stripe's webhooks travel, and a `404`/`502` there
+  loses paid upgrades silently while everything else looks healthy. A
+  request with a deliberately invalid `vault_id` is the cheapest probe of
+  it: `400` is the healthy answer, and it never reaches Stripe.
+
 ## Stripe dashboard checklist (entity: Docs Printing SRL, CIF RO22749955)
 
 1. Create the Stripe account as **Docs Printing SRL** (office@docsprinting.ro);
