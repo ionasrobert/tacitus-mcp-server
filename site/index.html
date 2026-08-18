@@ -154,6 +154,8 @@
   .term .add { color: var(--patina); }
   .term .del { color: #A85B45; text-decoration: line-through; text-decoration-thickness: 1px; }
   .term-note { font-size: .84rem; color: var(--graphite); font-style: italic; margin-top: .6rem; }
+  /* Recorded demos: same panel treatment as the terminal block they replaced. */
+  .demo { display: block; width: 100%; height: auto; margin-top: 2rem; border: 1px solid var(--mist); border-radius: 10px; background: var(--panel); }
 
   /* ---- sync ---- */
   .keychain {
@@ -297,25 +299,11 @@ qwzR2eKm0XsJcU6fHdPl8oGyAn3iM1NtE5aB9v…"}</pre>
         </div>
       </div>
 
-      <div class="term" role="img" aria-label="An abridged agent session using Tacitus tools">
-        <div class="bar"><i></i><i></i><i></i></div>
-        <pre>
-<span class="call">recall</span>({ query: "client x deadline", token_budget: 300 })
-<span class="dim">→ 1 memory, 41 tokens:</span> "Filing deadline is Sep 30, moved from Aug 15."
-  <span class="dim">source: notes/meetings/2026-07-14.md</span>
-
-<span class="call">propose_changes</span>({ note: "clients/client-x.md", … })
-<span class="dim">→ changeset cs_91, preview:</span>
-  <span class="del">- Deadline: August 15</span>
-  <span class="add">+ Deadline: September 30 (moved 2026-07-14)</span>
-
-<span class="call">commit_changes</span>({ changeset: "cs_91" })
-<span class="dim">→ committed as v18 · audit: {origin:"agent", tool:"commit_changes", note:"clients/client-x.md"}</span>
-
-<span class="call">revert</span>({ note: "clients/client-x.md", to_version: 17 })
-<span class="dim">→ reverted. Nothing an agent does is permanent unless you want it to be.</span></pre>
-      </div>
-      <p class="term-note">An abridged session — 25 tools in the native binary, 16 in the npm server, all schema-validated with structured errors.</p>
+      <img class="demo" src="/demo/tacitus-memory.gif" width="688" height="711" loading="lazy"
+           alt="An agent remembers a fact with its source, recalls it under a token budget, proposes a diff, commits it, and reverts it — the real tool calls and their real ids.">
+      <p class="term-note">Not a mock-up: that recording is the binary being driven over stdio, so the
+        memory ids, the changeset id and the audit line are the ones it actually produced.
+        25 tools in the native binary, 16 in the npm server, all schema-validated with structured errors.</p>
     </div>
   </section>
 
@@ -338,6 +326,12 @@ vault_id   = HKDF(root, <span class="dim">"tacitus/v1/vault-id"</span>)    <span
         <li><b>Self-hostable.</b> The relay is ~one MIT-licensed Rust crate with a Docker image. Or use ours, free while in beta: <code>wss://sync.tacitus.md</code>.</li>
         <li><b>No size ceiling.</b> Clients compact the encrypted log themselves — as of v0.23, snapshots chunk, so vaults of any size stay bounded.<sup class="cite"><a href="#fn4">4</a></sup></li>
       </ul>
+
+      <img class="demo" src="/demo/tacitus-sync.gif" width="877" height="498" loading="lazy"
+           alt="Two devices exchanging a note through a relay: plain Markdown on the devices, and in the relay's log.jsonl only base64 ciphertext, a sequence number and a timestamp.">
+      <p class="term-note">Left: two devices, plain Markdown. Right: everything the relay holds for that
+        vault — those blobs are the actual bytes it stored during this recording. No title, no path,
+        no plaintext.</p>
     </div>
   </section>
 

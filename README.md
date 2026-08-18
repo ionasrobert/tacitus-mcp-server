@@ -23,6 +23,11 @@ of Markdown notes into an **agent-native knowledge base**. It gives AI agents
 
 Notes stay as plain `.md` files in your folder. No cloud, no lock-in.
 
+![An agent remembering a fact with its source, recalling it under a token budget, proposing a diff, committing it, and reverting it](./site/demo/tacitus-memory.gif)
+
+*Recorded from a real session — the memory id, changeset id, version id and audit
+line above are what the binary actually returned ([how](./site/demo/README.md)).*
+
 ## Quick start
 
 ```bash
@@ -140,6 +145,15 @@ public API, with permission scoping, versioning, and audit built in.
 - [examples/](./examples/) — three complete plugins (Python read-only
   analyzer, Node daily-note cron agent, sandboxed WASM guest), tested against
   the binary
+
+### What the sync relay can see
+
+![Two devices exchanging a note through a relay: plain Markdown on the devices, only base64 ciphertext in the relay's log](./site/demo/tacitus-sync.gif)
+
+Left: two devices, plain Markdown. Right: everything the relay stores for that
+vault. Those blobs were read out of a real `log.jsonl` after the recording —
+no note title, no path, no plaintext. The vault code is the key and never
+leaves your devices; lose it and the relay's copy is undecryptable forever.
 
 ## Semantic search (optional neural embeddings)
 
