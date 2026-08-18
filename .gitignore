@@ -17,3 +17,6 @@ examples/plugins/*/target/
 
 # note interne de lucru (plan de lansare, lecții) — nu în repo-ul public
 tasks/
+
+# bundle MCPB construit local (artefact binar, se reface din packages/mcp-server)
+*.mcpb
