@@ -4,6 +4,14 @@ Notable changes per release. Every `vX.Y.Z` tag builds native installers via
 GitHub Releases; the npm server (`@dashiro/tacitus-mcp-server`) versions
 independently. Sync protocol details live in [docs/SYNC.md](docs/SYNC.md).
 
+## npm 0.1.3 — 2026-10-31
+
+- `@dashiro/tacitus-mcp-server`: `@modelcontextprotocol/sdk` 1.29 → 1.32.2
+  (still speaks protocol `2025-11-25`; the stateless `2026-07-28` revision
+  waits for SDK support). Package description fixed (25 native tools, not
+  24) and the README now states the hosted relay's plans — npm was the one
+  channel where Pro was never mentioned.
+
 ## 0.26.0 — 2026-08-14
 
 - **The upgrade path exists in the product now.** `sync status` opens a

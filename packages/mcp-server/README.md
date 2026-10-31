@@ -6,8 +6,8 @@ Site: **[tacitus.md](https://tacitus.md)** · MIT · no telemetry, no account.
 
 > **This is the core server (16 tools).** The flagship **native binary**
 > (25 tools — adds `properties_query`, templates, tasks, `rename_note`,
-> `get_version`, plus end-to-end encrypted multi-device sync — with zero
-> runtime deps) ships for macOS/Linux/Windows via
+> `get_version`, plus [end-to-end encrypted multi-device sync](#multi-device-sync-native-binary-beta)
+> — with zero runtime deps) ships for macOS/Linux/Windows via
 > [GitHub Releases](https://github.com/ionasrobert/tacitus-mcp-server/releases/latest):
 >
 > ```bash
@@ -99,8 +99,15 @@ tacitus-mcp sync run --live --vault ~/vault
 
 Two devices with the same note open co-edit at keystroke level, still
 end-to-end encrypted. The relay is one MIT Rust crate with a Docker image —
-self-host it with no limits, or use the hosted one (free at 100 MB per vault).
-Protocol and threat model:
+self-host it with no limits, or use the hosted one:
+
+| Hosted relay | Quota per vault | Price |
+|---|---|---|
+| Free | 100 MB | €0 |
+| **Pro** | 1 GB | €5/month or €48/year — [tacitus.md/#pro](https://tacitus.md/#pro) |
+
+No account: Pro is bought per vault id, and `tacitus-mcp sync status` shows
+how much of the quota a vault uses. Protocol and threat model:
 [docs/SYNC.md](https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md).
 
 ## How it stores things

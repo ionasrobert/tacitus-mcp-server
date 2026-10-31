@@ -155,6 +155,11 @@ vault. Those blobs were read out of a real `log.jsonl` after the recording —
 no note title, no path, no plaintext. The vault code is the key and never
 leaves your devices; lose it and the relay's copy is undecryptable forever.
 
+The relay is MIT like everything else — self-host it with no limits, or use
+the hosted one at `sync.tacitus.md`: free up to 100 MB per vault, **Pro**
+1 GB for €5/month or €48/year ([tacitus.md/#pro](https://tacitus.md/#pro)).
+No account — Pro is bought per vault id.
+
 ## Semantic search (optional neural embeddings)
 
 `search` defaults to **hybrid** mode (lexical + a deterministic, offline
