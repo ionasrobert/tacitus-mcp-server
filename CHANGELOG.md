@@ -4,6 +4,12 @@ Notable changes per release. Every `vX.Y.Z` tag builds native installers via
 GitHub Releases; the npm server (`@dashiro/tacitus-mcp-server`) versions
 independently. Sync protocol details live in [docs/SYNC.md](docs/SYNC.md).
 
+## 0.27.1 — 2026-11-14
+
+- Release build only: the Apple Silicon job now runs on `macos-15`.
+  GitHub retired the `macos-14` image that dist picks by default, so the
+  v0.27.0 tag never produced a release. Code is identical to 0.27.0.
+
 ## 0.27.0 + npm 0.2.0 — 2026-11-14
 
 - **Security: ids can no longer leave the vault.** `note_id` was joined onto
