@@ -701,3 +701,27 @@ fn capture_is_denied_in_read_only_scope() {
     assert_eq!(out["error"]["code"], "PERMISSION_DENIED");
     assert!(!vault.join("daily").exists());
 }
+
+#[test]
+fn read_only_scope_denies_memory_writes_too() {
+    let vault = temp_vault("ro-memory");
+    let reg = ToolRegistry::standard(&vault, PermissionScope::ReadOnly);
+    let out = reg.dispatch(
+        "remember",
+        &json!({ "content": "x", "type": "project", "source": { "origin": "t", "author": "human" } }),
+        None,
+    );
+    assert_eq!(out["error"]["code"], "PERMISSION_DENIED");
+    assert!(!vault.join(".tacitus/memory").exists(), "nothing written");
+    let out = reg.dispatch(
+        "forget",
+        &json!({ "memory_id": "mem_0000000000000000" }),
+        None,
+    );
+    assert_eq!(out["error"]["code"], "PERMISSION_DENIED");
+    // Reads still work.
+    assert_eq!(
+        reg.dispatch("recall", &json!({ "query": "x" }), None)["ok"],
+        true
+    );
+}

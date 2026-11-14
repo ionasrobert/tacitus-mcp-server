@@ -4,6 +4,27 @@ Notable changes per release. Every `vX.Y.Z` tag builds native installers via
 GitHub Releases; the npm server (`@dashiro/tacitus-mcp-server`) versions
 independently. Sync protocol details live in [docs/SYNC.md](docs/SYNC.md).
 
+## 0.27.2 + npm 0.2.1 — 2026-11-14
+
+- **npm: notes edited outside Tacitus are visible right away.** The npm
+  server built its index once, at startup, so a note edited in Obsidian (or
+  pulled with git) was invisible to search, the graph, properties and tasks
+  until a restart. It now re-reads the vault before every tool call, the way
+  the native engine always has. A wire test proves it.
+- **npm: `recall` conflicts use the documented field `memory_ids`.** The npm
+  server used to return `memoryIds`.
+- **npm: `capabilities` reports the real package version.** It used to
+  report a hardcoded `0.1.0`.
+- **native: read-only scope covers memories too.** With
+  `TACITUS_SCOPE=read-only`, `remember` and `forget` still wrote, because
+  memories don't go through the note writer. They now return
+  `PERMISSION_DENIED`, like every other write.
+- **tacitus.md:**
+  - docs rebuilt from this repo (`node scripts/build-site.mjs`), up to date
+    and without third-party fonts;
+  - three new guides;
+  - Open Graph, JSON-LD and a sitemap.
+
 ## 0.27.1 — 2026-11-14
 
 - Release build only: the Apple Silicon job now runs on `macos-15`.

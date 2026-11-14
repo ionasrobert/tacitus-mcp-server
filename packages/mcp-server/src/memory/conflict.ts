@@ -2,7 +2,8 @@ import type { Memory } from './types';
 
 export interface Conflict {
   key: string;
-  memoryIds: string[];
+  /** Wire name matches the Rust engine and docs/MCP_API.md. */
+  memory_ids: string[];
 }
 
 /**
@@ -23,7 +24,7 @@ export function detectConflicts(memories: Memory[]): Conflict[] {
   for (const [key, group] of byKey) {
     const distinctContents = new Set(group.map((m) => m.content));
     if (distinctContents.size > 1) {
-      conflicts.push({ key, memoryIds: group.map((m) => m.id) });
+      conflicts.push({ key, memory_ids: group.map((m) => m.id) });
     }
   }
   return conflicts;

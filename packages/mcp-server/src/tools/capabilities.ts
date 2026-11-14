@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { serverVersion } from '../lib/version';
 import type { PermissionScope, Tool } from './types';
 
 export interface Capabilities {
@@ -19,7 +20,7 @@ export function capabilitiesTool(listTools: () => Tool[], scope: PermissionScope
     inputSchema: z.object({}).strict(),
     handler: (): Capabilities => ({
       server: 'tacitus-memory',
-      version: '0.1.0',
+      version: serverVersion(),
       tools: listTools().map((t) => ({ name: t.name, description: t.description })),
       permissions: { scope },
     }),

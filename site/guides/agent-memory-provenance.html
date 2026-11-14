@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your agent's memory needs provenance · Tacitus</title>
+<meta name="description" content="Agent memory that forgets where facts came from turns guesses into truths. Why every memory should carry a source, and why contradictions should be shown.">
+<link rel="canonical" href="https://tacitus.md/guides/agent-memory-provenance.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="Your agent's memory needs provenance">
+<meta property="og:description" content="Agent memory that forgets where facts came from turns guesses into truths. Why every memory should carry a source, and why contradictions should be shown.">
+<meta property="og:url" content="https://tacitus.md/guides/agent-memory-provenance.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"Your agent's memory needs provenance","description":"Agent memory that forgets where facts came from turns guesses into truths. Why every memory should carry a source, and why contradictions should be shown.","datePublished":"2026-11-14","dateModified":"2026-11-14","mainEntityOfPage":"https://tacitus.md/guides/agent-memory-provenance.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://tacitus.md/guides/"},{"@type":"ListItem","position":3,"name":"Your agent's memory needs provenance","item":"https://tacitus.md/guides/agent-memory-provenance.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/">Docs</a>
+      <a href="/guides/" aria-current="page">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/guides/">Guides</a> /</p>
+<h1>Your agent's memory needs provenance</h1>
+<p class="updated">Article · 2026-11-14</p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#a-memory-without-a-source-is-a-rumor">A memory without a source is a rumor</a></li><li><a href="#contradictions-should-be-shown-not-resolved">Contradictions should be shown, not resolved</a></li><li><a href="#idempotent-ids-make-remember-safe-to-retry">Idempotent ids make &quot;remember&quot; safe to retry</a></li><li><a href="#budgets-are-part-of-correctness">Budgets are part of correctness</a></li><li><a href="#writes-should-be-reviewable-and-reversible">Writes should be reviewable and reversible</a></li><li><a href="#the-tradeoffs">The tradeoffs</a></li><li><a href="#try-it">Try it</a></li></ul></nav>
+<article class="prose">
+<p>Most agent memory today is a pile of sentences. The agent saw something, summarized it, saved it, and the next session reads it back with the same confidence as everything else in the prompt. A month later nobody can say whether &quot;the API rate limit is 100 requests per minute&quot; came from the vendor's docs, from a user who was guessing, or from the agent misreading a log.</p>
+<p>That's the failure this article is about, and it's why Tacitus refuses to store a memory without a source. The argument is general, though. It applies to any memory layer you build or adopt.</p>
+<h2 id="a-memory-without-a-source-is-a-rumor">A memory without a source is a rumor</h2>
+<p>Think about how a careful person handles a remembered fact. &quot;I think the deploy freeze starts Friday&quot; is acceptable. &quot;Ana said in Tuesday's standup that the deploy freeze starts Friday&quot; is much better: you can weigh it, check it, or ask Ana. The second version doesn't contain more facts. It contains the <em>provenance</em> of the fact.</p>
+<p>Language models don't keep that distinction on their own. Once a sentence is in the context window, its origin is gone unless someone wrote it down. A memory layer is where it gets written down, or lost for good.</p>
+<p>So the floor is: every memory carries <strong>where it came from</strong> (a file, a URL, a conversation), <strong>who asserted it</strong> (a human or an agent), and <strong>when</strong>. In Tacitus that is the <code>source</code> object on <code>remember</code>, and leaving it out is an error, not a warning:</p>
+<pre><code class="language-json">{ &quot;code&quot;: &quot;MISSING_PROVENANCE&quot;,
+  &quot;reason&quot;: &quot;A memory must carry its source (provenance).&quot;,
+  &quot;suggestion&quot;: &quot;Provide source: { origin, author: \&quot;human\&quot;|\&quot;agent\&quot;, timestamp? }.&quot; }</code></pre>
+<p>Making provenance optional sounds friendlier, but it means most memories will have none, because the easiest path is to skip it. Agents take the easiest path the same way people do.</p>
+<p>The <code>author</code> field deserves a note. &quot;human&quot; versus &quot;agent&quot; is the most useful single bit you can store. A preference the user stated and a conclusion the agent inferred should not carry equal weight, and with that bit recorded they don't have to.</p>
+<h2 id="contradictions-should-be-shown-not-resolved">Contradictions should be shown, not resolved</h2>
+<p>Facts change. The deploy day moves, the pricing changes, a library gets replaced. Most memory systems handle this by overwriting: the newest write wins, or a similarity check merges the &quot;duplicate&quot;. Both are silent, and both are wrong in the cases that matter.</p>
+<p>Newest-wins is wrong whenever the newer fact is less reliable: an agent's inference written after the human's explicit statement. Similarity merging is wrong whenever two facts look alike but disagree, which is exactly what a contradiction is.</p>
+<p>The alternative is cheap. Give facts that can change a stable <code>key</code>, such as <code>deploy-day</code>. When two memories share a key but differ in content, return both, plus an explicit conflict:</p>
+<pre><code class="language-json">&quot;conflicts&quot;: [ { &quot;key&quot;: &quot;deploy-day&quot;,
+                 &quot;memory_ids&quot;: [&quot;mem_4add74f8ddbe73cc&quot;, &quot;mem_8a3ab0034c9aeb17&quot;] } ]</code></pre>
+<p>Now the agent can do what a careful person would: &quot;The standup said Tuesdays only; <code>docs/RELEASING.md</code> says any weekday after CI. Which holds?&quot; Each side comes with its source, so the question can be answered. And because conflicts are computed over everything relevant to the query, not only over what fit in the token budget, a small budget can't hide a contradiction.</p>
+<p>This costs one round trip to the user now and then. It saves the much more expensive case where the agent confidently acts on the wrong half of a contradiction it never saw.</p>
+<h2 id="idempotent-ids-make-remember-safe-to-retry">Idempotent ids make &quot;remember&quot; safe to retry</h2>
+<p>Agents retry. Tool calls time out, sessions restart, the same instruction gets processed twice. If every <code>remember</code> creates a new record, memory slowly fills with near-duplicates that crowd out everything else in recall.</p>
+<p>Tacitus derives a memory's id from what it says and where it came from: type, key, content, origin and author. The timestamp is not part of it. Remembering the same fact from the same source twice returns the same <code>memory_id</code> and writes nothing new. The same fact from a <em>different</em> source gets a different id, and that's intended: two independent sources agreeing is information worth keeping.</p>
+<h2 id="budgets-are-part-of-correctness">Budgets are part of correctness</h2>
+<p>A memory layer that returns &quot;everything relevant&quot; will eventually return more than the agent can read, and the model then drops something without telling you which part. Recall should take a <code>token_budget</code> as a hard ceiling. Each returned item should report its own <code>token_count</code>, and items that don't fit should be skipped rather than cut mid-sentence. The agent then knows exactly what it received, and can ask for more on purpose.</p>
+<p>The same principle applies to notes. Search returns ranked snippets, never whole files, and the agent opens a note in steps: outline, then frontmatter, then full text.</p>
+<h2 id="writes-should-be-reviewable-and-reversible">Writes should be reviewable and reversible</h2>
+<p>Provenance covers what the agent <em>knows</em>. The other half is what the agent <em>changes</em>. If an agent can edit your notes, every edit should be:</p>
+<ul><li><strong>previewed</strong>: a dry run that returns the before and after diff (<code>propose_changes</code>);</li><li><strong>atomic</strong>: the whole changeset or nothing (<code>commit_changes</code>);</li><li><strong>reversible</strong>: one call restores the prior state (<code>revert</code>);</li><li><strong>audited</strong>: an append-only log of who changed what, and when (<code>audit_log</code>).</li></ul>
+<p>None of this is new. It's what we expect from git and from databases. It's just rarely applied to the files an agent touches. When it is, letting an agent write to your notes stops being a leap of faith.</p>
+<h2 id="the-tradeoffs">The tradeoffs</h2>
+<p>Provenance has costs:</p>
+<ul><li><strong>More tokens per memory.</strong> A source object adds tokens to every recalled item. In practice it's a few dozen, which is small next to the cost of acting on a wrong fact, but it isn't zero.</li><li><strong>Agents must be told to use keys.</strong> Contradiction detection only works for facts filed under the same <code>key</code>. Two contradictory memories with no key, or with different keys, won't be flagged. Choosing keys is a habit you have to put in your agent instructions.</li><li><strong>&quot;Origin&quot; is a free-text field.</strong> Tacitus records the origin the agent gives; it doesn't verify that <code>docs/RELEASING.md</code> says what the agent claims. Provenance makes a claim checkable, not true.</li><li><strong>Surfacing conflicts means asking the user.</strong> That's the point, but if your agent runs unattended, you need a policy for what happens when nobody is there to answer.</li></ul>
+<p>None of these is a reason to drop provenance. They're reasons to be precise about what it gives you: memories you can audit and weigh, instead of an ever-growing pile of confident sentences.</p>
+<h2 id="try-it">Try it</h2>
+<p>Tacitus is an MIT-licensed MCP server that runs on a folder of Markdown files and works with Claude Code, Claude Desktop or any MCP client:</p>
+<pre><code class="language-bash">npx -y @dashiro/tacitus-mcp-server ~/agent-memory</code></pre>
+<ul><li><a href="/guides/claude-code-memory.html">Give Claude Code long-term memory, with sources</a>: setup and a <code>CLAUDE.md</code> snippet.</li><li><a href="/guides/obsidian-mcp-server.html">Use your Obsidian vault as an MCP server</a>: the same model on top of an existing vault.</li><li><a href="/docs/mcp-api.html#remember">MCP API reference</a>: <code>remember</code>, <code>recall</code> and every other tool.</li><li>Source: <a href="https://github.com/ionasrobert/tacitus-mcp-server" rel="noopener">github.com/ionasrobert/tacitus-mcp-server</a></li></ul>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>

@@ -12,7 +12,7 @@ describe('detectConflicts (M3)', () => {
     const conflicts = detectConflicts(mems);
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]?.key).toBe('user.timezone');
-    expect([...(conflicts[0]?.memoryIds ?? [])].sort()).toEqual(['tz1', 'tz2']);
+    expect([...(conflicts[0]?.memory_ids ?? [])].sort()).toEqual(['tz1', 'tz2']);
   });
 
   it('does not flag agreeing memories (same key, same content)', () => {
@@ -35,6 +35,6 @@ describe('detectConflicts (M3)', () => {
     ];
     const res = recall(mems, { query: 'timezone' });
     expect(res.conflicts).toHaveLength(1);
-    expect([...(res.conflicts[0]?.memoryIds ?? [])].sort()).toEqual(['tz1', 'tz2']);
+    expect([...(res.conflicts[0]?.memory_ids ?? [])].sort()).toEqual(['tz1', 'tz2']);
   });
 });

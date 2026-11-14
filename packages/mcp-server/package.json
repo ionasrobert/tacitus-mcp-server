@@ -1,7 +1,7 @@
 {
   "name": "@dashiro/tacitus-mcp-server",
   "mcpName": "io.github.ionasrobert/tacitus-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tacitus MCP server (27 tools) - long-term agent memory with provenance, retrieval under token budgets, transactional write-back, typed notes, tasks, templates and quick capture. The native binary (same tools, zero deps, end-to-end encrypted multi-device sync) ships via GitHub Releases.",
   "type": "module",
   "license": "MIT",

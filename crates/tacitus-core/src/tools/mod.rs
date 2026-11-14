@@ -393,7 +393,22 @@ impl ToolRegistry {
 
     // ---- memory ----
 
+    /// Memories bypass `NoteWriter` (they are not notes), so the read-only
+    /// scope must be enforced here — otherwise `remember`/`forget` would be
+    /// the one mutation a read-only session still allowed.
+    fn assert_memory_writable(&self) -> Result<(), TacitusError> {
+        if self.scope == PermissionScope::ReadOnly {
+            return Err(TacitusError::new(
+                "PERMISSION_DENIED",
+                "This session is read-only; writes are not permitted.",
+                "Re-open the vault with a read-write scope to apply changes.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn remember(&self, args: RememberArgs) -> Result<Value, TacitusError> {
+        self.assert_memory_writable()?;
         let input = RememberInput {
             content: args.content,
             memory_type: args.memory_type,
@@ -445,6 +460,7 @@ impl ToolRegistry {
     }
 
     pub fn forget(&self, args: ForgetArgs) -> Result<Value, TacitusError> {
+        self.assert_memory_writable()?;
         if !crate::ids::is_plain_id(&args.memory_id) {
             return Err(TacitusError::new(
                 "INVALID_INPUT",

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use your Obsidian vault as an MCP server (no plugin) · Tacitus</title>
+<meta name="description" content="Point any MCP agent at your Obsidian vault: wikilink graph, Bases-like property queries, tasks, templates and typed notes, with plain .md files and no plugin.">
+<link rel="canonical" href="https://tacitus.md/guides/obsidian-mcp-server.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="Use your Obsidian vault as an MCP server (no plugin)">
+<meta property="og:description" content="Point any MCP agent at your Obsidian vault: wikilink graph, Bases-like property queries, tasks, templates and typed notes, with plain .md files and no plugin.">
+<meta property="og:url" content="https://tacitus.md/guides/obsidian-mcp-server.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","headline":"Use your Obsidian vault as an MCP server (no plugin)","description":"Point any MCP agent at your Obsidian vault: wikilink graph, Bases-like property queries, tasks, templates and typed notes, with plain .md files and no plugin.","datePublished":"2026-11-14","dateModified":"2026-11-14","mainEntityOfPage":"https://tacitus.md/guides/obsidian-mcp-server.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://tacitus.md/guides/"},{"@type":"ListItem","position":3,"name":"Use your Obsidian vault as an MCP server (no plugin)","item":"https://tacitus.md/guides/obsidian-mcp-server.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/">Docs</a>
+      <a href="/guides/" aria-current="page">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/guides/">Guides</a> /</p>
+<h1>Use your Obsidian vault as an MCP server (no plugin)</h1>
+<p class="updated">Guide · 2026-11-14</p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#1-connect-the-vault">1. Connect the vault</a></li><li><a href="#2-what-tacitus-adds-to-your-vault">2. What Tacitus adds to your vault</a></li><li><a href="#3-the-wikilink-graph-as-a-tool">3. The wikilink graph, as a tool</a></li><li><a href="#4-frontmatter-as-a-database">4. Frontmatter as a database</a></li><li><a href="#5-declared-types-keep-properties-consistent">5. Declared types keep properties consistent</a></li><li><a href="#6-tasks-including-due-dates">6. Tasks, including due dates</a></li><li><a href="#7-templates-the-agent-can-fill-in">7. Templates the agent can fill in</a></li><li><a href="#8-optional-encrypted-sync-between-devices">8. Optional: encrypted sync between devices</a></li><li><a href="#whats-next">What's next</a></li></ul></nav>
+<article class="prose">
+<p>An Obsidian vault is a folder of Markdown files, and that's all an MCP server needs. This guide connects your vault to Claude Code, Claude Desktop or any other MCP client through Tacitus. The agent can then search notes, follow wikilinks, query frontmatter like a database and manage tasks, without an Obsidian plugin and without Obsidian running. Your files stay plain <code>.md</code>. All outputs below come from a real run against the Tacitus npm server (0.2.0), trimmed.</p>
+<h2 id="1-connect-the-vault">1. Connect the vault</h2>
+<pre><code class="language-bash"># Claude Code
+claude mcp add -s user tacitus -- npx -y @dashiro/tacitus-mcp-server ~/Obsidian/MyVault</code></pre>
+<p>For Claude Desktop, add this to <code>claude_desktop_config.json</code>:</p>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;tacitus&quot;: {
+      &quot;command&quot;: &quot;npx&quot;,
+      &quot;args&quot;: [&quot;-y&quot;, &quot;@dashiro/tacitus-mcp-server&quot;, &quot;/Users/you/Obsidian/MyVault&quot;]
+    }
+  }
+}</code></pre>
+<p>You can use the native binary instead of <code>npx</code>; see the <a href="/guides/claude-code-memory.html#2-add-the-mcp-server-to-claude-code">install steps</a>. Both servers re-read the vault on every call, so a note you edit in Obsidian is visible to the agent on its next tool call, with no restart. (npm 0.2.0 indexed the vault only at startup; use 0.2.1 or newer, which <code>npx -y</code> picks up by default.)</p>
+<h2 id="2-what-tacitus-adds-to-your-vault">2. What Tacitus adds to your vault</h2>
+<p>Tacitus never rewrites your notes on its own. It only keeps its own state in one hidden folder:</p>
+<div class="table"><table><thead><tr><th>Path</th><th>What it holds</th></tr></thead><tbody><tr><td><code>.tacitus/memory/</code></td><td>agent memories, one Markdown file each, with their source</td></tr><tr><td><code>.tacitus/history/</code></td><td>one snapshot per committed change, which is what makes <code>revert</code> possible</td></tr><tr><td><code>.tacitus/audit.log</code></td><td>one JSON line per commit or revert</td></tr><tr><td><code>.tacitus/templates/</code></td><td>optional: your note templates</td></tr><tr><td><code>.tacitus/types/</code></td><td>optional: declared note types</td></tr></tbody></table></div>
+<p>Obsidian doesn't index dot-folders, the same way it handles its own <code>.obsidian/</code>, so none of this shows up in your file explorer, graph or search. If you sync the vault with git, commit <code>.tacitus/memory/</code>, <code>templates/</code> and <code>types/</code>. You can ignore <code>history/</code> and <code>audit.log</code> if you prefer. The <a href="/docs/data-format.html">data format</a> page documents every file.</p>
+<h2 id="3-the-wikilink-graph-as-a-tool">3. The wikilink graph, as a tool</h2>
+<p>The agent doesn't have to grep for <code>[[</code>. <code>graph_query</code> resolves wikilinks the way Obsidian does: by full path first, then by basename. It takes <code>relation: links | backlinks | neighbors</code>, and <code>depth</code> for neighbors.</p>
+<p><code>suggest_links</code> lists the links a note is missing, each with the reasons it was suggested:</p>
+<pre><code class="language-json">// suggest_links { note_id: &quot;pricing&quot; }
+{ &quot;note_id&quot;: &quot;pricing&quot;,
+  &quot;suggestions&quot;: [
+    { &quot;note_id&quot;: &quot;people/ana&quot;, &quot;title&quot;: &quot;Ana&quot;, &quot;score&quot;: 0.599,
+      &quot;reasons&quot;: [&quot;title_mentioned&quot;, &quot;semantic&quot;],
+      &quot;snippet&quot;: &quot;# Pricing Pro is 5 EUR per month. Ana owns pricing. ...&quot; },
+    { &quot;note_id&quot;: &quot;projects/launch&quot;, &quot;title&quot;: &quot;Launch&quot;, &quot;score&quot;: 0.568,
+      &quot;reasons&quot;: [&quot;title_mentioned&quot;, &quot;semantic&quot;] } ] }</code></pre>
+<p>The possible reasons are <code>title_mentioned</code>, <code>semantic</code>, <code>shared_tags</code> and <code>backlink</code>, so the agent (or you) can decide which links are worth adding. Adding one goes through <code>link { from, to }</code>, which won't add a duplicate.</p>
+<p>Renaming a note in Obsidian updates its links, and <code>rename_note</code> does the same for the agent. It retargets every wikilink that resolves to the note and keeps aliases and headings:</p>
+<pre><code class="language-json">// rename_note { from: &quot;people/ana&quot;, to: &quot;people/ana-pop&quot; }
+{ &quot;version_id&quot;: &quot;v_1cbb1ef0e69cd769&quot;, &quot;from&quot;: &quot;people/ana&quot;,
+  &quot;to&quot;: &quot;people/ana-pop&quot;, &quot;links_updated_in&quot;: 1 }</code></pre>
+<p>The rename is a single changeset, so one <code>revert</code> undoes the move and the link edits together.</p>
+<h2 id="4-frontmatter-as-a-database">4. Frontmatter as a database</h2>
+<p>If you use Obsidian properties or Bases, <code>properties_query</code> covers the same ground for an agent. Filters are AND-ed and use the operators <code>eq</code>, <code>ne</code>, <code>contains</code>, <code>exists</code>, <code>not_exists</code>, <code>gt</code>, <code>lt</code>, <code>gte</code> and <code>lte</code>. ISO dates compare correctly:</p>
+<pre><code class="language-json">// properties_query { filters: [ { key: &quot;status&quot;, op: &quot;eq&quot;, value: &quot;active&quot; },
+//                               { key: &quot;due&quot;, op: &quot;lt&quot;, value: &quot;2026-12-31&quot; } ],
+//                    select: [&quot;status&quot;, &quot;due&quot;] }
+{ &quot;rows&quot;: [ { &quot;note_id&quot;: &quot;projects/launch&quot;, &quot;title&quot;: &quot;Launch&quot;,
+              &quot;properties&quot;: { &quot;due&quot;: &quot;2026-12-01&quot;, &quot;status&quot;: &quot;active&quot; },
+              &quot;token_count&quot;: 25 } ] }</code></pre>
+<p>Results default to 50 rows. You can sort with <code>sort_by</code> and <code>descending</code> and cap the output with <code>token_budget</code>.</p>
+<h2 id="5-declared-types-keep-properties-consistent">5. Declared types keep properties consistent</h2>
+<p>Queries are only as reliable as your frontmatter. If you describe a type in <code>.tacitus/types/project.yaml</code>:</p>
+<pre><code class="language-yaml">description: A project note
+properties:
+  status: { type: string, required: true, enum: [active, paused, done] }
+  due: { type: date }</code></pre>
+<p>then the agent can't write a malformed <code>type: project</code> note:</p>
+<pre><code class="language-json">{ &quot;ok&quot;: false, &quot;error&quot;: { &quot;code&quot;: &quot;SCHEMA_VIOLATION&quot;,
+  &quot;reason&quot;: &quot;Note \&quot;projects/site\&quot; (type \&quot;project\&quot;): \&quot;status\&quot; must be one of [\&quot;active\&quot;, \&quot;paused\&quot;, \&quot;done\&quot;], got \&quot;someday\&quot;.&quot;,
+  &quot;suggestion&quot;: &quot;Fix the frontmatter to match .tacitus/types/project.yaml (see list_types).&quot; } }</code></pre>
+<p>Every problem is listed at once, so the agent fixes them in one retry. Notes without a <code>type</code>, or with a type you haven't declared, aren't checked. A note that already broke the rules before you declared the type can still be tagged or linked. A write is refused only if it adds a new problem. See <a href="/docs/mcp-api.html#declared-types">declared types</a>.</p>
+<h2 id="6-tasks-including-due-dates">6. Tasks, including due dates</h2>
+<p>Every checklist line in the vault is a task. <code>list_tasks</code> reads due dates written as <code>due:YYYY-MM-DD</code> or in the Tasks-plugin style <code>📅 YYYY-MM-DD</code>, plus inline <code>#tags</code>:</p>
+<pre><code class="language-json">// list_tasks { done: false }
+{ &quot;tasks&quot;: [
+    { &quot;note_id&quot;: &quot;projects/launch&quot;, &quot;line&quot;: 4,
+      &quot;text&quot;: &quot;write the changelog due:2026-11-20 #release&quot;,
+      &quot;done&quot;: false, &quot;due&quot;: &quot;2026-11-20&quot;, &quot;tags&quot;: [&quot;release&quot;] },
+    { &quot;note_id&quot;: &quot;daily/2026-11-14&quot;, &quot;line&quot;: 2,
+      &quot;text&quot;: &quot;ask Ana whether yearly pricing ships with the beta&quot;,
+      &quot;done&quot;: false, &quot;due&quot;: null, &quot;tags&quot;: [] } ] }</code></pre>
+<p><code>toggle_task</code> takes <code>note_id</code>, <code>line</code> and <code>expect_text</code> exactly as <code>list_tasks</code> returned them. If you edited that line in Obsidian in the meantime, the agent gets a <code>CONFLICT</code> instead of checking off the wrong task.</p>
+<p>The second task above came from <code>capture</code>, which appends to <code>daily/YYYY-MM-DD.md</code>. If your daily notes live elsewhere in Obsidian, that's the folder to point your Daily Notes core plugin at, or you can leave the two separate.</p>
+<h2 id="7-templates-the-agent-can-fill-in">7. Templates the agent can fill in</h2>
+<p>Put templates in <code>.tacitus/templates/</code>. Each <code>{{var}}</code> placeholder becomes a parameter, and <code>{{date}}</code>, <code>{{time}}</code> and <code>{{datetime}}</code> fill themselves in:</p>
+<pre><code class="language-markdown">---
+title: &quot;{{title}}&quot;
+date: {{date}}
+attendees: {{count}}
+---
+# {{title}}
+
+## Notes
+
+## Actions</code></pre>
+<p><code>list_templates</code> reports <code>{ &quot;name&quot;: &quot;meeting&quot;, &quot;vars&quot;: [&quot;title&quot;, &quot;count&quot;] }</code>. Then <code>create_from_template { template: &quot;meeting&quot;, note_id: &quot;meetings/pricing-sync&quot;, vars: { title: &quot;Pricing sync&quot;, count: 3 } }</code> writes <code>attendees: 3</code> as a number, not a string, because placeholders are filled in before the YAML is parsed. A missing var returns <code>MISSING_VARS</code> with the exact list.</p>
+<h2 id="8-optional-encrypted-sync-between-devices">8. Optional: encrypted sync between devices</h2>
+<p>If you already sync the vault with iCloud, Syncthing or git, nothing changes: Tacitus works on whatever folder you give it. The native binary also has its own sync, end-to-end encrypted through a relay that only sees ciphertext:</p>
+<pre><code class="language-bash">tacitus-mcp sync init --vault ~/Obsidian/MyVault   # prints your vault code
+tacitus-mcp sync run --live --vault ~/Obsidian/MyVault</code></pre>
+<p>The vault code is the key: anyone who has it can read the vault, and if you lose it the relay's copy can't be decrypted. Your local files are never at risk. Details are in the <a href="/docs/sync.html">sync docs</a>.</p>
+<h2 id="whats-next">What's next</h2>
+<ul><li><a href="/guides/claude-code-memory.html">Give Claude Code long-term memory, with sources</a>: <code>remember</code>, <code>recall</code> and a <code>CLAUDE.md</code> snippet.</li><li><a href="/guides/agent-memory-provenance.html">Your agent's memory needs provenance</a>: the design argument behind all this.</li><li><a href="/docs/mcp-api.html">MCP API reference</a>: all 27 tools.</li></ul>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>

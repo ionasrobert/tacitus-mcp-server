@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP API reference — all 27 Tacitus tools · Tacitus</title>
+<meta name="description" content="Every Tacitus MCP tool: arguments, outputs and error codes for agent memory, retrieval under token budgets, revertible write-back, types, tasks and capture.">
+<link rel="canonical" href="https://tacitus.md/docs/mcp-api.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="MCP API reference — all 27 Tacitus tools">
+<meta property="og:description" content="Every Tacitus MCP tool: arguments, outputs and error codes for agent memory, retrieval under token budgets, revertible write-back, types, tasks and capture.">
+<meta property="og:url" content="https://tacitus.md/docs/mcp-api.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","headline":"MCP API reference — all 27 Tacitus tools","description":"Every Tacitus MCP tool: arguments, outputs and error codes for agent memory, retrieval under token budgets, revertible write-back, types, tasks and capture.","datePublished":"2026-11-14","dateModified":"2026-11-14","mainEntityOfPage":"https://tacitus.md/docs/mcp-api.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://tacitus.md/docs/"},{"@type":"ListItem","position":3,"name":"MCP API reference — all 27 Tacitus tools","item":"https://tacitus.md/docs/mcp-api.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/" aria-current="page">Docs</a>
+      <a href="/guides/">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/docs/">Docs</a> /</p>
+<h1>MCP API reference — all 27 Tacitus tools</h1>
+<p class="updated">Updated 2026-11-14 · <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md">source on GitHub</a></p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#transport--envelope">Transport &amp; envelope</a></li><li><a href="#memory">Memory</a></li><li><a href="#retrieval">Retrieval</a></li><li><a href="#write-back-transactional">Write-back (transactional)</a></li><li><a href="#convenience-auto-commit-still-versioned--audited">Convenience (auto-commit; still versioned + audited)</a></li><li><a href="#templates">Templates</a></li><li><a href="#tasks">Tasks</a></li><li><a href="#declared-types">Declared types</a></li><li><a href="#capture">Capture</a></li><li><a href="#meta">Meta</a></li><li><a href="#error-codes-complete-list">Error codes (complete list)</a></li></ul></nav>
+<article class="prose">
+<p>The MCP tool contract <strong>is</strong> Tacitus's public API — the same surface agents, plugins, scripts, and the desktop app build on. This page documents every tool (27 tools). The native binary (≥ 0.27.0) and the npm server (≥ 0.2.0) serve the identical set — a parity test keeps names and descriptions byte-identical; npm 0.1.x served only 16 (no properties, templates, tasks, rename/delete, versions, link suggestions, types or capture). The identical contract — same registry, same envelopes — is also served inside the WASM plugin sandbox via <code>tacitus.call</code> (see <a href="/docs/plugins.html#5-sandboxed-wasm-plugins-experimental">PLUGINS.md §5</a>).</p>
+<h2 id="transport--envelope">Transport &amp; envelope</h2>
+<p>The server speaks <a href="https://modelcontextprotocol.io" rel="noopener">MCP</a> over <strong>stdio</strong> (JSON-RPC 2.0). Start it with the vault folder as the only argument:</p>
+<pre><code class="language-bash">tacitus-mcp /path/to/vault              # native binary
+npx -y @dashiro/tacitus-mcp-server /path/to/vault   # npm (same 27 tools)</code></pre>
+<p>Every tool returns one text content block containing JSON with a uniform envelope:</p>
+<pre><code class="language-jsonc">{ &quot;ok&quot;: true,  &quot;data&quot;: { ... } }                     // success
+{ &quot;ok&quot;: false, &quot;error&quot;: {                            // failure (isError: true)
+    &quot;code&quot;: &quot;NOTE_NOT_FOUND&quot;,
+    &quot;reason&quot;: &quot;No note with id \&quot;x\&quot;.&quot;,
+    &quot;suggestion&quot;: &quot;Check the id with list_notes.&quot;
+} }</code></pre>
+<p>Errors are <strong>structured and actionable</strong> — <code>code</code> is machine-matchable, <code>suggestion</code> says what to do differently. No stack traces.</p>
+<h3 id="permission-scope">Permission scope</h3>
+<p>Set <code>TACITUS_SCOPE=read-only</code> in the server's environment to forbid all mutations: any write tool fails with <code>PERMISSION_DENIED</code>, while reads and <code>propose_changes</code> (a dry-run) still work. Default is <code>read-write</code>. <code>capabilities</code> reports the active scope.</p>
+<h3 id="conventions">Conventions</h3>
+<ul><li><strong><code>note_id</code></strong> — the note's vault-relative path without <code>.md</code> (<code>projects/launch</code>). Stable across edits; never line numbers.</li><li><strong><code>token_budget</code></strong> — a hard output ceiling. Tools that accept it return items until the budget is exhausted; every item carries its own <code>token_count</code> (~4 chars/token heuristic).</li><li>Bounded by default: list-like tools have limits (<code>search</code> top_k, <code>properties_query</code> limit 50, <code>list_tasks</code> limit 100, <code>audit_log</code> limit 100, <code>get_version</code> content 500 tokens). Expansion is explicit.</li></ul>
+<hr>
+<h2 id="memory">Memory</h2>
+<h3 id="remember"><code>remember</code></h3>
+<p>Store a typed memory. <strong>Provenance is mandatory</strong> — a fact without a source is not trustworthy. Idempotent: identical content+source ⇒ identical <code>memory_id</code> (safe to retry).</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td><code>content</code></td><td>string</td><td>required, non-empty</td></tr><tr><td><code>type</code></td><td>string</td><td><code>user</code> | <code>feedback</code> | <code>project</code> | <code>reference</code></td></tr><tr><td><code>tags</code></td><td>string[]</td><td>optional</td></tr><tr><td><code>key</code></td><td>string</td><td>optional — memories sharing a key are conflict-checked</td></tr><tr><td><code>source</code></td><td>object</td><td><strong>required</strong>: <code>{ origin, author: &quot;human&quot;|&quot;agent&quot;, timestamp? }</code> (timestamp auto-stamped if omitted)</td></tr><tr><td><code>ttl</code></td><td>number</td><td>optional, seconds</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;memory_id&quot;: &quot;mem_&lt;16hex&gt;&quot; }</code> Errors: <code>MISSING_PROVENANCE</code>, <code>INVALID_TYPE</code>, <code>INVALID_INPUT</code>.</p>
+<h3 id="recall"><code>recall</code></h3>
+<p>Relevance-ranked recall within a token budget. Conflicting memories (same <code>key</code>, different content) are <strong>surfaced, never silently resolved</strong>.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td><code>query</code></td><td>string</td><td>required</td></tr><tr><td><code>type</code></td><td>string</td><td>optional filter</td></tr><tr><td><code>token_budget</code></td><td>number</td><td>optional hard ceiling</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;items&quot;: [{ &quot;memory&quot;: {id, type, content, tags, key?, source, ttl?}, &quot;score&quot;: n, &quot;token_count&quot;: n }], &quot;conflicts&quot;: [{ &quot;key&quot;: &quot;...&quot;, &quot;memory_ids&quot;: [...] }] }</code></p>
+<h3 id="forget"><code>forget</code></h3>
+<p><code>{ memory_id }</code> → <code>{ &quot;removed&quot;: true|false }</code></p>
+<hr>
+<h2 id="retrieval">Retrieval</h2>
+<h3 id="search"><code>search</code></h3>
+<p>Ranked snippets — never whole notes. <code>mode</code>: <code>hybrid</code> (default; lexical precision + semantic recall for morphological variants), <code>lexical</code>, or <code>semantic</code>.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th></tr></thead><tbody><tr><td><code>query</code></td><td>string</td></tr><tr><td><code>mode</code></td><td><code>hybrid</code> | <code>lexical</code> | <code>semantic</code> (optional)</td></tr><tr><td><code>token_budget</code></td><td>number (optional)</td></tr><tr><td><code>top_k</code></td><td>number (optional)</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;hits&quot;: [{ &quot;note_id&quot;, &quot;title&quot;, &quot;score&quot;, &quot;snippet&quot;, &quot;token_count&quot; }] }</code></p>
+<h3 id="get_note"><code>get_note</code></h3>
+<p>Progressive disclosure: fetch only as much as you need.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th></tr></thead><tbody><tr><td><code>note_id</code></td><td>string</td></tr><tr><td><code>format</code></td><td><code>outline</code> (default) | <code>frontmatter_only</code> | <code>full</code></td></tr><tr><td><code>max_tokens</code></td><td>number (optional ceiling; sets <code>truncated</code>)</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;note_id&quot;, &quot;title&quot;, &quot;format&quot;, &quot;content&quot;, &quot;token_count&quot;, &quot;truncated&quot; }</code> Errors: <code>NOTE_NOT_FOUND</code>.</p>
+<h3 id="graph_query"><code>graph_query</code></h3>
+<p>Traverse the wikilink graph instead of grepping.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th></tr></thead><tbody><tr><td><code>from</code></td><td>string (note_id)</td></tr><tr><td><code>relation</code></td><td><code>links</code> | <code>backlinks</code> | <code>neighbors</code></td></tr><tr><td><code>depth</code></td><td>number (default 1; used by <code>neighbors</code>)</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;from&quot;, &quot;relation&quot;, &quot;nodes&quot;: [{ &quot;note_id&quot;, &quot;title&quot; }] }</code> Errors: <code>NOTE_NOT_FOUND</code>, <code>INVALID_INPUT</code>.</p>
+<h3 id="suggest_links"><code>suggest_links</code></h3>
+<p>Auto-linking without an LLM: ranked <code>[[wikilink]]</code> candidates the note doesn't link to yet, scored by title mentions in the note, semantic similarity, shared tags, and existing backlinks. Each row carries machine-readable <code>reasons</code> (<code>title_mentioned</code> | <code>semantic</code> | <code>shared_tags</code> | <code>backlink</code>); for a mention, <code>snippet</code> shows the source context where the link would go.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th></tr></thead><tbody><tr><td><code>note_id</code></td><td>string</td></tr><tr><td><code>top_k</code></td><td>number (default 5)</td></tr><tr><td><code>min_score</code></td><td>number 0..1 (default 0.15)</td></tr><tr><td><code>token_budget</code></td><td>number (hard ceiling)</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;note_id&quot;, &quot;suggestions&quot;: [{ &quot;note_id&quot;, &quot;title&quot;, &quot;score&quot;, &quot;reasons&quot;, &quot;snippet&quot;, &quot;token_count&quot; }] }</code> Errors: <code>NOTE_NOT_FOUND</code>.</p>
+<h3 id="list_notes"><code>list_notes</code></h3>
+<p>No params → <code>{ &quot;notes&quot;: [{ &quot;note_id&quot;, &quot;title&quot;, &quot;path&quot; }] }</code></p>
+<h3 id="properties_query"><code>properties_query</code></h3>
+<p>Bases-like structured queries over typed YAML frontmatter — &quot;all notes where status=active and due &lt; 2026-08-01&quot; is a query, not a search.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td><code>filters</code></td><td>array</td><td><code>{ key, op, value? }</code>, AND-ed. Ops: <code>eq</code> <code>ne</code> <code>contains</code> (array membership / case-insensitive substring) <code>exists</code> <code>not_exists</code> <code>gt</code> <code>lt</code> <code>gte</code> <code>lte</code> (numeric when both numbers, else lexicographic — ISO dates work)</td></tr><tr><td><code>select</code></td><td>string[]</td><td>project only these property keys</td></tr><tr><td><code>sort_by</code></td><td>string</td><td>property key; missing values sort last</td></tr><tr><td><code>descending</code></td><td>bool</td><td>default false</td></tr><tr><td><code>limit</code></td><td>number</td><td>default 50</td></tr><tr><td><code>token_budget</code></td><td>number</td><td>hard ceiling</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;rows&quot;: [{ &quot;note_id&quot;, &quot;title&quot;, &quot;properties&quot;: {..}, &quot;token_count&quot; }] }</code></p>
+<hr>
+<h2 id="write-back-transactional">Write-back (transactional)</h2>
+<p>The safe path for multi-note mutations: <strong>propose → inspect diff → commit</strong>. Every commit produces a <code>version_id</code> snapshot under <code>.tacitus/history/</code> that <code>revert</code> can undo, and appends to the audit log.</p>
+<h3 id="propose_changes"><code>propose_changes</code></h3>
+<p>Dry-run a changeset — <strong>nothing is written</strong>.</p>
+<p><code>{ ops: [{ op: &quot;create&quot;|&quot;update&quot;|&quot;delete&quot;, note_id, content?, frontmatter? }] }</code> → <code>{ &quot;change_id&quot;: &quot;chg_&lt;16hex&gt;&quot;, &quot;diff&quot;: [{ &quot;note_id&quot;, &quot;op&quot;, &quot;before&quot;, &quot;after&quot; }] }</code></p>
+<p>Idempotent (<code>change_id</code> is a hash of the changeset). Validation errors: <code>CONFLICT</code> (create over existing), <code>NOTE_NOT_FOUND</code> (update/delete of missing).</p>
+<h3 id="commit_changes"><code>commit_changes</code></h3>
+<p><code>{ change_id }</code> → <code>{ &quot;version_id&quot;: &quot;v_&lt;16hex&gt;&quot; }</code> Applies atomically (all-or-nothing with rollback), re-validating against disk. Errors: <code>UNKNOWN_CHANGE</code> (never proposed, or already committed), <code>PERMISSION_DENIED</code>. Note: pending change_ids live in the server process — propose and commit within the same session.</p>
+<h3 id="revert"><code>revert</code></h3>
+<p><code>{ version_id }</code> → <code>{ &quot;reverted&quot;: true, &quot;version_id&quot; }</code> Restores every note the version touched to its prior state. Errors: <code>UNKNOWN_VERSION</code>, <code>PERMISSION_DENIED</code>.</p>
+<h3 id="rename_note"><code>rename_note</code></h3>
+<p>Rename <strong>and retarget every wikilink</strong> that resolves to the note (full-id, basename, case-insensitive; <code>|alias</code> and <code>#heading</code>/<code>#^block</code> parts kept) — one atomic changeset; a single <code>revert</code> undoes the whole rename.</p>
+<p><code>{ from, to }</code> → <code>{ &quot;version_id&quot;, &quot;from&quot;, &quot;to&quot;, &quot;links_updated_in&quot;: n }</code> Errors: <code>NOTE_NOT_FOUND</code>, <code>CONFLICT</code> (target exists), <code>INVALID_INPUT</code>.</p>
+<h3 id="delete_note"><code>delete_note</code></h3>
+<p><code>{ note_id }</code> → <code>{ &quot;version_id&quot; }</code> — versioned; <code>revert</code> restores it.</p>
+<h3 id="get_version"><code>get_version</code></h3>
+<p>Inspect what a committed version changed — pairs with <code>audit_log</code> and <code>revert</code> to close the observability loop.</p>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td><code>version_id</code></td><td>string</td><td>from <code>audit_log</code> / <code>commit_changes</code></td></tr><tr><td><code>include_content</code></td><td>bool</td><td>default false (ops-only summary)</td></tr><tr><td><code>max_tokens</code></td><td>number</td><td>per-content clip, default 500</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;version_id&quot;, &quot;change_id&quot;, &quot;notes&quot;: [{ &quot;note_id&quot;, &quot;op&quot;: &quot;created&quot;|&quot;updated&quot;|&quot;deleted&quot;, &quot;before&quot;: null|{content, truncated}, &quot;after&quot;: ... }] }</code> Errors: <code>UNKNOWN_VERSION</code>.</p>
+<hr>
+<h2 id="convenience-auto-commit-still-versioned--audited">Convenience (auto-commit; still versioned + audited)</h2>
+<div class="table"><table><thead><tr><th>Tool</th><th>Params</th><th>Returns</th></tr></thead><tbody><tr><td><code>create_note</code></td><td><code>{ note_id, content, frontmatter? }</code></td><td><code>{ version_id }</code> — <code>CONFLICT</code> if it exists</td></tr><tr><td><code>update_note</code></td><td><code>{ note_id, content?, frontmatter? }</code></td><td><code>{ version_id }</code> — omitted fields keep current values</td></tr><tr><td><code>link</code></td><td><code>{ from, to }</code></td><td><code>{ version_id }</code> — appends <code>[[to]]</code>, idempotent</td></tr><tr><td><code>tag</code></td><td><code>{ note_id, tag }</code></td><td><code>{ version_id }</code> — frontmatter tag, deduplicated</td></tr><tr><td><code>audit_log</code></td><td><code>{ limit? }</code> (default 100)</td><td><code>{ entries: [{ ts, action: &quot;commit&quot;|&quot;revert&quot;, version_id, change_id?, notes[], scope }] }</code> most-recent-first</td></tr></tbody></table></div>
+<hr>
+<h2 id="templates">Templates</h2>
+<p>Templates are Markdown files in <code>.tacitus/templates/*.md</code>; their <code>{{var}}</code> placeholders <strong>are</strong> the schema. Substitution happens on the raw text before YAML parsing, so <code>priority: {{p}}</code> with <code>p: 3</code> becomes a real number. Builtins <code>{{date}}</code> (YYYY-MM-DD), <code>{{time}}</code> (HH:MM), <code>{{datetime}}</code> (RFC3339) auto-fill.</p>
+<h3 id="list_templates"><code>list_templates</code></h3>
+<p>No params → <code>{ &quot;templates&quot;: [{ &quot;name&quot;, &quot;vars&quot;: [&quot;title&quot;, ...] }] }</code></p>
+<h3 id="create_from_template"><code>create_from_template</code></h3>
+<p><code>{ template, note_id, vars?: { name: scalar } }</code> → <code>{ &quot;version_id&quot;, &quot;note_id&quot; }</code> Errors: <code>TEMPLATE_NOT_FOUND</code>, <code>MISSING_VARS</code> (names exactly what's missing — fixable in one retry), <code>CONFLICT</code>, <code>INVALID_INPUT</code> (non-scalar var).</p>
+<hr>
+<h2 id="tasks">Tasks</h2>
+<p>Every checklist line (<code>- [ ] text</code>, <code>* [x] text</code>, indented allowed) anywhere in the vault is a typed entity. Metadata parsed from the text: due date (<code>due:YYYY-MM-DD</code> or <code>📅 YYYY-MM-DD</code>), inline <code>#tags</code>.</p>
+<h3 id="list_tasks"><code>list_tasks</code></h3>
+<div class="table"><table><thead><tr><th>Param</th><th>Type</th></tr></thead><tbody><tr><td><code>done</code></td><td>bool (false = open, true = done, omit = all)</td></tr><tr><td><code>due_before</code> / <code>due_after</code></td><td>ISO date strings</td></tr><tr><td><code>tag</code></td><td>string</td></tr><tr><td><code>note_id</code></td><td>string</td></tr><tr><td><code>limit</code></td><td>number (default 100)</td></tr><tr><td><code>token_budget</code></td><td>number</td></tr></tbody></table></div>
+<p>→ <code>{ &quot;tasks&quot;: [{ &quot;note_id&quot;, &quot;line&quot;, &quot;text&quot;, &quot;done&quot;, &quot;due&quot;, &quot;tags&quot;, &quot;token_count&quot; }] }</code> Sorted by due date (undated last), then note_id, then line.</p>
+<h3 id="toggle_task"><code>toggle_task</code></h3>
+<p><code>{ note_id, line, expect_text }</code> → <code>{ &quot;version_id&quot; }</code> Pass <code>line</code> and <code>text</code> <strong>exactly as returned by <code>list_tasks</code></strong> — <code>expect_text</code> is an optimistic-concurrency guard: if the line moved or changed you get <code>CONFLICT</code> (re-list and retry) instead of flipping the wrong task.</p>
+<hr>
+<h2 id="declared-types">Declared types</h2>
+<p>A file <code>.tacitus/types/&lt;name&gt;.yaml</code> declares what a note with frontmatter <code>type: &lt;name&gt;</code> carries:</p>
+<pre><code class="language-yaml">description: An article idea
+properties:
+  status: { type: string, required: true, enum: [idea, draft, published] }
+  priority: { type: number }
+  due: { type: date }        # YYYY-MM-DD, optionally with a time
+  topics: { type: list }</code></pre>
+<p>Every create/update (including <code>propose_changes</code>, so a dry-run already fails) whose <strong>resulting</strong> frontmatter names a declared type is validated: required properties present (null counts as absent), each value of its declared type, enum respected. On an update only problems the write <strong>introduces</strong> are refused — a note that predates its type declaration can still be tagged or linked, it just can't get worse. Extra properties are allowed; undeclared types and untyped notes are not validated; sync merges are never validated. A violation is <code>SCHEMA_VIOLATION</code> with <strong>every</strong> problem in <code>reason</code>; a malformed type file is <code>INVALID_TYPE_DEF</code> (never a silent &quot;no validation&quot;). Pair with <code>properties_query</code> (<code>{ key: &quot;type&quot;, op: &quot;eq&quot;, value: &quot;article&quot; }</code>).</p>
+<h3 id="list_types"><code>list_types</code></h3>
+<p>No params → <code>{ &quot;types&quot;: [{ &quot;name&quot;, &quot;description&quot;, &quot;properties&quot;: { &quot;&lt;key&gt;&quot;: { &quot;type&quot;, &quot;required&quot;, &quot;enum&quot;? } } }] }</code> — a broken file appears as <code>{ &quot;name&quot;, &quot;error&quot; }</code>. Sorted by name; <code>.yaml</code> wins over <code>.yml</code>.</p>
+<hr>
+<h2 id="capture">Capture</h2>
+<h3 id="capture-1"><code>capture</code></h3>
+<p><code>{ text, task?: bool, date?: &quot;YYYY-MM-DD&quot; }</code> → <code>{ &quot;note_id&quot;: &quot;daily/&lt;date&gt;&quot;, &quot;version_id&quot;, &quot;line&quot;, &quot;created&quot; }</code></p>
+<p>Appends one line to the day's note (default: today, server local time): <code>- HH:MM text</code>, or <code>- [ ] text</code> with <code>task: true</code> (so <code>list_tasks</code> sees it, <code>due:</code> included). Multi-line text is folded onto one line. The note is created on first capture — from the <code>daily</code> template when it needs no vars beyond <code>{{date}}</code> (filled with the capture's date), else <code># &lt;date&gt;</code> with <code>type: daily</code> and <code>date</code> in the frontmatter. Versioned + audited; one <code>revert</code> undoes one capture. Errors: <code>INVALID_INPUT</code> (empty text, bad date), <code>PERMISSION_DENIED</code>, <code>SCHEMA_VIOLATION</code> (if you declared a <code>daily</code> type).</p>
+<hr>
+<h2 id="meta">Meta</h2>
+<h3 id="capabilities"><code>capabilities</code></h3>
+<p>No params → <code>{ &quot;server&quot;: &quot;tacitus-memory&quot;, &quot;version&quot;, &quot;tools&quot;: [{ name, description }], &quot;permissions&quot;: { &quot;scope&quot;: &quot;read-write&quot;|&quot;read-only&quot; } }</code></p>
+<p>Call this first: it tells you exactly what you can do and under which scope — never guess.</p>
+<hr>
+<h2 id="error-codes-complete-list">Error codes (complete list)</h2>
+<div class="table"><table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody><tr><td><code>MISSING_PROVENANCE</code></td><td><code>remember</code> without <code>source</code></td></tr><tr><td><code>INVALID_TYPE</code></td><td>bad memory type</td></tr><tr><td><code>INVALID_INPUT</code></td><td>malformed argument (bad op, bad author, non-scalar var, …)</td></tr><tr><td><code>NOTE_NOT_FOUND</code></td><td>unknown <code>note_id</code></td></tr><tr><td><code>INVALID_NOTE_ID</code></td><td><code>note_id</code> that would leave the vault: empty, absolute, <code>\</code>/NUL, a drive letter, an empty/<code>.</code>/<code>..</code> segment, or under <code>.tacitus/</code></td></tr><tr><td><code>SCHEMA_VIOLATION</code></td><td>a write breaks the note's declared type (every problem listed in <code>reason</code>)</td></tr><tr><td><code>INVALID_TYPE_DEF</code></td><td>a <code>.tacitus/types/*.yaml</code> file is malformed</td></tr><tr><td><code>CONFLICT</code></td><td>create-over-existing, rename target exists, stale task guard</td></tr><tr><td><code>UNKNOWN_CHANGE</code></td><td><code>commit_changes</code> with an unknown/consumed <code>change_id</code></td></tr><tr><td><code>UNKNOWN_VERSION</code></td><td><code>revert</code>/<code>get_version</code> with an unknown <code>version_id</code></td></tr><tr><td><code>PERMISSION_DENIED</code></td><td>mutation under <code>TACITUS_SCOPE=read-only</code></td></tr><tr><td><code>TEMPLATE_NOT_FOUND</code></td><td>unknown or path-escaping template name</td></tr><tr><td><code>MISSING_VARS</code></td><td>template placeholders left unfilled (listed in <code>reason</code>)</td></tr><tr><td><code>IO_ERROR</code></td><td>filesystem failure (path/permissions)</td></tr><tr><td><code>INTERNAL</code></td><td>unexpected server-side failure</td></tr><tr><td><code>INVALID_MANIFEST</code></td><td>bad <code>tacitus-plugin.toml</code> (unknown tool, write tool under read-only scope, entry escape)</td></tr><tr><td><code>PLUGIN_ABI</code></td><td>wasm guest broke ABI v1 (missing export, wrong version, non-JSON output)</td></tr><tr><td><code>PLUGIN_TRAP</code></td><td>wasm guest crashed or exceeded its fuel/memory limits</td></tr></tbody></table></div>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>

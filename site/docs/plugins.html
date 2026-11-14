@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plugins and integrations — SDK, scripts, WASM · Tacitus</title>
+<meta name="description" content="Build on Tacitus: the typed TypeScript SDK, scripts over MCP, and sandboxed WASM plugins that call the same tools with a capability allowlist.">
+<link rel="canonical" href="https://tacitus.md/docs/plugins.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="Plugins and integrations — SDK, scripts, WASM">
+<meta property="og:description" content="Build on Tacitus: the typed TypeScript SDK, scripts over MCP, and sandboxed WASM plugins that call the same tools with a capability allowlist.">
+<meta property="og:url" content="https://tacitus.md/docs/plugins.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","headline":"Plugins and integrations — SDK, scripts, WASM","description":"Build on Tacitus: the typed TypeScript SDK, scripts over MCP, and sandboxed WASM plugins that call the same tools with a capability allowlist.","datePublished":"2026-11-14","dateModified":"2026-11-14","mainEntityOfPage":"https://tacitus.md/docs/plugins.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://tacitus.md/docs/"},{"@type":"ListItem","position":3,"name":"Plugins and integrations — SDK, scripts, WASM","item":"https://tacitus.md/docs/plugins.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/" aria-current="page">Docs</a>
+      <a href="/guides/">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/docs/">Docs</a> /</p>
+<h1>Plugins and integrations — SDK, scripts, WASM</h1>
+<p class="updated">Updated 2026-11-14 · <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/PLUGINS.md">source on GitHub</a></p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#1-connect-an-ai-agent-zero-code">1. Connect an AI agent (zero code)</a></li><li><a href="#2-write-a-plugin-in-python-no-sdk-needed">2. Write a plugin in Python (no SDK needed)</a></li><li><a href="#3-write-a-plugin-in-typescript">3. Write a plugin in TypeScript</a></li><li><a href="#4-embed-the-engine-rust">4. Embed the engine (Rust)</a></li><li><a href="#complete-runnable-examples">Complete runnable examples</a></li><li><a href="#plugin-patterns">Plugin patterns</a></li><li><a href="#ground-rules-please-follow-these">Ground rules (please follow these)</a></li><li><a href="#5-sandboxed-wasm-plugins-experimental">5. Sandboxed WASM plugins (experimental)</a></li></ul></nav>
+<article class="prose">
+<p><strong>In Tacitus, a plugin is an MCP client.</strong> There is no privileged plugin API behind the app's back: the same 25-tool contract serves AI agents, your scripts, cron jobs, and the desktop app itself. That's a deliberate inversion of the Obsidian model — instead of plugins with full filesystem access, every integration gets:</p>
+<ul><li>a <strong>typed, versioned API</strong> (<a href="/docs/mcp-api.html">MCP_API.md</a>) with structured errors,</li><li><strong>permission scoping</strong> (<code>TACITUS_SCOPE=read-only</code> for anything that only reads),</li><li><strong>automatic versioning + audit</strong> for every write (users can inspect and revert anything your integration does),</li><li><strong>bounded output</strong> (<code>token_budget</code>) so agent integrations never blow their context window.</li></ul>
+<p>If you can speak JSON-RPC over stdio, you can extend Tacitus in any language.</p>
+<h2 id="1-connect-an-ai-agent-zero-code">1. Connect an AI agent (zero code)</h2>
+<pre><code class="language-bash"># Claude Code
+claude mcp add tacitus -- tacitus-mcp /path/to/vault
+# or without the native binary:
+claude mcp add tacitus -- npx -y @dashiro/tacitus-mcp-server /path/to/vault</code></pre>
+<pre><code class="language-jsonc">// Claude Desktop — claude_desktop_config.json
+{
+  &quot;mcpServers&quot;: {
+    &quot;tacitus&quot;: {
+      &quot;command&quot;: &quot;tacitus-mcp&quot;,
+      &quot;args&quot;: [&quot;/path/to/vault&quot;],
+      &quot;env&quot;: { &quot;TACITUS_SCOPE&quot;: &quot;read-only&quot; }   // optional: reads only
+    }
+  }
+}</code></pre>
+<p>The agent discovers everything itself — tell it to call <code>capabilities</code> first.</p>
+<h2 id="2-write-a-plugin-in-python-no-sdk-needed">2. Write a plugin in Python (no SDK needed)</h2>
+<p>The whole protocol is newline-delimited JSON-RPC on stdin/stdout. A complete working client:</p>
+<pre><code class="language-python">import json, subprocess
+
+class Tacitus:
+    def __init__(self, vault, read_only=False):
+        import os
+        env = dict(os.environ)
+        if read_only:
+            env[&quot;TACITUS_SCOPE&quot;] = &quot;read-only&quot;
+        self.p = subprocess.Popen([&quot;tacitus-mcp&quot;, vault], text=True, env=env,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.n = 0
+        self._rpc(&quot;initialize&quot;, protocolVersion=&quot;2024-11-05&quot;,
+                  capabilities={}, clientInfo={&quot;name&quot;: &quot;my-plugin&quot;, &quot;version&quot;: &quot;1.0&quot;})
+        self._send({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;method&quot;: &quot;notifications/initialized&quot;})
+
+    def _send(self, msg):
+        self.p.stdin.write(json.dumps(msg) + &quot;\n&quot;); self.p.stdin.flush()
+
+    def _rpc(self, method, **params):
+        self.n += 1
+        self._send({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: self.n, &quot;method&quot;: method, &quot;params&quot;: params})
+        for line in self.p.stdout:
+            msg = json.loads(line)
+            if msg.get(&quot;id&quot;) == self.n:
+                return msg[&quot;result&quot;]
+
+    def call(self, tool, **args):
+        result = self._rpc(&quot;tools/call&quot;, name=tool, arguments=args)
+        payload = json.loads(result[&quot;content&quot;][0][&quot;text&quot;])
+        if not payload[&quot;ok&quot;]:
+            raise RuntimeError(f'{payload[&quot;error&quot;][&quot;code&quot;]}: {payload[&quot;error&quot;][&quot;reason&quot;]}'
+                               f' — {payload[&quot;error&quot;][&quot;suggestion&quot;]}')
+        return payload[&quot;data&quot;]
+
+t = Tacitus(&quot;/path/to/vault&quot;)
+for hit in t.call(&quot;search&quot;, query=&quot;launch deadline&quot;, token_budget=300)[&quot;hits&quot;]:
+    print(hit[&quot;note_id&quot;], hit[&quot;score&quot;], hit[&quot;snippet&quot;][:60])</code></pre>
+<h2 id="3-write-a-plugin-in-typescript">3. Write a plugin in TypeScript</h2>
+<p>The typed route: <a href="https://github.com/ionasrobert/tacitus-mcp-server/tree/main/packages/sdk" rel="noopener"><code>@dashiro/tacitus-sdk</code></a> wraps everything below — <code>TacitusClient.spawn({ vault })</code>, 25 typed methods, structured errors thrown as <code>TacitusToolError</code>. The raw MCP client, for reference:</p>
+<pre><code class="language-ts">import { Client } from &quot;@modelcontextprotocol/sdk/client/index.js&quot;;
+import { StdioClientTransport } from &quot;@modelcontextprotocol/sdk/client/stdio.js&quot;;
+
+const client = new Client({ name: &quot;my-plugin&quot;, version: &quot;1.0.0&quot; });
+await client.connect(new StdioClientTransport({
+  command: &quot;tacitus-mcp&quot;,
+  args: [&quot;/path/to/vault&quot;],
+}));
+
+const res = await client.callTool({ name: &quot;list_tasks&quot;, arguments: { done: false } });
+const { ok, data, error } = JSON.parse((res.content as any)[0].text);
+if (!ok) throw new Error(`${error.code}: ${error.reason}`);
+console.log(data.tasks);</code></pre>
+<h2 id="4-embed-the-engine-rust">4. Embed the engine (Rust)</h2>
+<p>For deep integrations (UIs, sync services), skip the protocol and use <code>tacitus-core</code> directly — it's exactly what the MCP server and the Tacitus desktop app are built on:</p>
+<pre><code class="language-toml">[dependencies]
+tacitus-core = { git = &quot;https://github.com/ionasrobert/tacitus-mcp-server&quot; }</code></pre>
+<pre><code class="language-rust">use tacitus_core::vault::{HashingEmbedder, NoteWriter, PermissionScope,
+                          SearchArgs, VaultIndex, search_notes};
+
+let index = VaultIndex::build(&quot;/path/to/vault&quot;.as_ref())?;
+let hits = search_notes(&amp;index, &quot;launch&quot;, &amp;SearchArgs::default(), &amp;HashingEmbedder::new());
+let mut writer = NoteWriter::new(&quot;/path/to/vault&quot;, PermissionScope::ReadWrite);
+writer.create_note(&quot;inbox/from-my-tool&quot;, &quot;Hello from my integration&quot;, None)?;</code></pre>
+<p>Key modules: <code>vault</code> (index, search, graph, properties, tasks, templates, rename, transactional <code>NoteWriter</code>) and <code>memory</code> (remember/recall/store). All mutation helpers are versioned + audited automatically.</p>
+<h2 id="complete-runnable-examples">Complete runnable examples</h2>
+<p>Two zero-dependency plugins live in <a href="https://github.com/ionasrobert/tacitus-mcp-server/tree/main/examples/" rel="noopener"><code>examples/</code></a>: <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/examples/vault_digest.py" rel="noopener"><code>vault_digest.py</code></a> (read-only analyzer) and <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/examples/daily_note.mjs" rel="noopener"><code>daily_note.mjs</code></a> (capturer/cron agent — template pack install, CONFLICT recovery, idempotent re-runs). Start there.</p>
+<h2 id="plugin-patterns">Plugin patterns</h2>
+<p><strong>Read-only analyzer</strong> — run with <code>TACITUS_SCOPE=read-only</code>; combine <code>properties_query</code> + <code>graph_query</code> + <code>list_tasks</code> to compute reports (orphan notes, overdue tasks, stale projects). Zero risk to the vault by construction.</p>
+<p><strong>Inbox capturer</strong> — a script/webhook that turns external events (mail, bookmarks, meeting transcripts) into notes via <code>create_from_template</code>. Ship a <em>template pack</em> (a folder of <code>.tacitus/templates/*.md</code>) with your plugin — templates are data, the safest kind of plugin.</p>
+<p><strong>Scheduled agent</strong> — a cron job that runs an LLM with Tacitus attached: &quot;summarize yesterday's notes into <code>daily/YYYY-MM-DD</code>&quot; or &quot;find and flag conflicting memories&quot;. Writes are auto-versioned, so a bad run is one <code>revert</code> away — check <code>audit_log</code> + <code>get_version</code> to review what it did.</p>
+<p><strong>Task front-end</strong> — <code>list_tasks</code> + <code>toggle_task</code> give you a complete, conflict-guarded task API; render it as a kanban, a menu-bar widget, a TUI.</p>
+<p><strong>Memory curator</strong> — <code>recall</code> surfaces conflicts (<code>conflicts[]</code>); a plugin can present them to the user and <code>forget</code> the losers.</p>
+<h2 id="ground-rules-please-follow-these">Ground rules (please follow these)</h2>
+<ol><li><strong>Ask for the least privilege.</strong> Reads only? Run the server with <code>TACITUS_SCOPE=read-only</code>.</li><li><strong>Write through the API, not the filesystem.</strong> MCP writes are validated, versioned, audited, and revertible; raw writes are none of those. (Formats are documented in <a href="/docs/data-format.html">DATA_FORMAT.md</a> for readers.)</li><li><strong>Respect budgets.</strong> Pass <code>token_budget</code> when feeding results to an LLM; use <code>get_note</code> progressively (<code>outline</code> → <code>full</code>).</li><li><strong>Handle errors by <code>code</code>.</strong> They're designed for programmatic recovery — <code>MISSING_VARS</code> lists what to add; <code>CONFLICT</code> on <code>toggle_task</code> means re-list and retry.</li><li><strong>One writer at a time.</strong> Don't run several uncoordinated mutating integrations against the same vault simultaneously.</li></ol>
+<h2 id="5-sandboxed-wasm-plugins-experimental">5. Sandboxed WASM plugins (experimental)</h2>
+<p>The capability-scoped plugin host is real: crate <code>tacitus-plugins</code> runs a guest wasm module under Wasmtime with <strong>manifest-declared permissions, no WASI, no ambient filesystem access</strong>. The guest's only doors are two host functions — and the important one is the whole thesis in miniature:</p>
+<blockquote><p>**<code>tacitus.call</code> <em>is</em> <code>tools/call</code>.** A sandboxed plugin calls the same tools, with the same argument shapes and the same <code>{ ok, data | error }</code> envelope, as any MCP agent. Capability scoping = a tool allowlist.</p></blockquote>
+<h3 id="manifest--tacitus-plugintoml">Manifest — <code>tacitus-plugin.toml</code></h3>
+<p>A plugin is a directory under <code>&lt;vault&gt;/.tacitus/plugins/&lt;name&gt;/</code> (directory name must equal the manifest <code>name</code>):</p>
+<pre><code class="language-toml">name = &quot;hello-tacitus&quot;            # ^[a-z0-9][a-z0-9-]*$
+version = &quot;0.1.0&quot;
+description = &quot;Read-only vault digest.&quot;
+entry = &quot;hello_tacitus.wasm&quot;      # relative to this file; &quot;..&quot; rejected
+
+[permissions]
+scope = &quot;read-only&quot;               # &quot;read-only&quot; | &quot;read-write&quot;
+tools = [&quot;search&quot;]                # exact allowlist; anything else → PERMISSION_DENIED
+
+# optional: run automatically on lifecycle events (a permission in itself —
+# embedders include it in user consent). Valid hooks: note_saved.
+hooks = [&quot;note_saved&quot;]</code></pre>
+<p>Hook delivery reuses <code>tacitus_run</code> with no ABI change — the input becomes <code>{&quot;event&quot;: {&quot;type&quot;: &quot;note_saved&quot;, &quot;note_id&quot;: &quot;…&quot;}}</code> inside the usual <code>{&quot;input&quot;: …, &quot;plugin&quot;: …}</code> payload. In the desktop app, hooks fire on editor saves only; plugin and sync writes never re-trigger them (no loops by construction).</p>
+<p>Validation happens at load, before any wasm compiles: unknown tools, write tools under <code>scope = &quot;read-only&quot;</code>, and entry paths that escape the plugin directory are all <code>INVALID_MANIFEST</code> with an actionable suggestion.</p>
+<h3 id="abi-v1">ABI v1</h3>
+<p>Payloads are UTF-8 JSON in guest linear memory, addressed as <code>(ptr &lt;&lt; 32) | len</code> packed into an <code>i64</code>.</p>
+<div class="table"><table><thead><tr><th>Guest exports</th><th>Signature</th><th>Contract</th></tr></thead><tbody><tr><td><code>memory</code></td><td>memory</td><td>the linear memory</td></tr><tr><td><code>tacitus_abi_version</code></td><td><code>() -&gt; i32</code></td><td>must return <code>1</code></td></tr><tr><td><code>tacitus_alloc</code></td><td><code>(len: i32) -&gt; i32</code></td><td>pointer to <code>len</code> writable bytes</td></tr><tr><td><code>tacitus_dealloc</code></td><td><code>(ptr: i32, len: i32)</code></td><td>free (a no-op is fine)</td></tr><tr><td><code>tacitus_run</code></td><td><code>(ptr: i32, len: i32) -&gt; i64</code></td><td>entry point; input <code>{&quot;input&quot;: …, &quot;plugin&quot;: {name, version}}</code>; returns packed ptr/len of a <code>{ok, data|error}</code> envelope</td></tr></tbody></table></div>
+<div class="table"><table><thead><tr><th>Host imports (module <code>&quot;tacitus&quot;</code>)</th><th>Signature</th><th>Contract</th></tr></thead><tbody><tr><td><code>call</code></td><td><code>(tool_ptr, tool_len, args_ptr, args_len: i32) -&gt; i64</code></td><td>run an allowlisted tool; <strong>always</strong> returns an envelope — denial is <code>PERMISSION_DENIED</code> data, never a trap</td></tr><tr><td><code>log</code></td><td><code>(level: i32, ptr: i32, len: i32)</code></td><td>0=debug 1=info 2=warn 3=error; captured by the host</td></tr></tbody></table></div>
+<p><strong>All 27 tools of <a href="/docs/mcp-api.html">MCP_API.md</a> are reachable in the sandbox</strong> — the host and the MCP server share one registry (<code>tacitus_core::tools</code>), so the surfaces cannot diverge. The manifest allowlist gates which of them a plugin may call; the 12 write tools (<code>remember</code>, <code>forget</code>, <code>commit_changes</code>, <code>revert</code>, <code>create_note</code>, <code>update_note</code>, <code>link</code>, <code>tag</code>, <code>create_from_template</code>, <code>toggle_task</code>, <code>rename_note</code>, <code>delete_note</code>) additionally require <code>scope = &quot;read-write&quot;</code>. (<code>propose_changes</code> is a dry-run and stays available read-only — committing is the guarded step.) Writes go through the same transactional <code>NoteWriter</code> as every agent — versioned, audited, revertible.</p>
+<h3 id="limits-host-policy--a-manifest-can-never-raise-them">Limits (host policy — a manifest can never raise them)</h3>
+<p>Each <code>run()</code> gets a deterministic <strong>fuel</strong> budget (default 10⁹ instructions) and the guest's linear memory is capped (default 64 MiB). Embedders can also set a <strong>wall-clock deadline</strong> (<code>epoch_deadline_ms</code> — the desktop app uses 5s) so a hung guest cannot pin a thread; fuel bounds instructions, epochs bound time. A runaway or crashing guest surfaces as a structured <code>PLUGIN_TRAP</code>; a protocol violation (missing export, wrong ABI version, non-JSON output) as <code>PLUGIN_ABI</code>.</p>
+<h3 id="try-it">Try it</h3>
+<p>The reference guest lives at <a href="https://github.com/ionasrobert/tacitus-mcp-server/tree/main/examples/plugins/hello-tacitus/" rel="noopener"><code>examples/plugins/hello-tacitus/</code></a> — ABI v1 by hand in ~100 lines of Rust, no SDK:</p>
+<pre><code class="language-sh">rustup target add wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path examples/plugins/hello-tacitus/Cargo.toml
+cargo run -p tacitus-plugins --example run_plugin -- \
+  /path/to/vault examples/plugins/hello-tacitus '{&quot;query&quot;:&quot;launch&quot;}'</code></pre>
+<h3 id="plugin-registry">Plugin registry</h3>
+<p><a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/registry/plugins.json" rel="noopener"><code>registry/plugins.json</code></a> is the public plugin index (served raw from this repo; the desktop app reads it). Each entry lists display metadata plus the plugin's files as <code>{path, url, sha256}</code> — installers verify every hash and then validate the downloaded manifest locally, so the registry can never grant more than the manifest the user approves. To publish a plugin: host your <code>.wasm</code> + <code>tacitus-plugin.toml</code> at stable URLs (e.g. a GitHub release) and open a PR adding an entry.</p>
+<h3 id="from-the-cli-cron-agents-scripts">From the CLI (cron agents, scripts)</h3>
+<p>The native binary embeds the plugin runtime (build with <code>--no-default-features</code> for a lean server without it):</p>
+<pre><code class="language-sh">tacitus-mcp plugin list [--vault &lt;path&gt;]
+tacitus-mcp plugin run &lt;name&gt; [--vault &lt;path&gt;] [--input '&lt;json&gt;'] [--timeout-ms &lt;n&gt;]
+# cron: 0 7 * * * tacitus-mcp plugin run daily-digest --vault ~/vault</code></pre>
+<p><code>run</code> prints the <code>{ ok, data | error }</code> envelope on stdout, guest logs on stderr, and exits 0 only on <code>ok: true</code> — cron-friendly. Consent model: invoking a plugin from the terminal IS the consent, exactly like running any script; the manifest's scope still gates writes, and every write is audited as <code>plugin:&lt;name&gt;</code>, versioned and revertible. (The desktop app adds a stored approval flow because there plugins can also run automatically on hooks.)</p>
+<h3 id="in-the-desktop-app">In the desktop app</h3>
+<p>The Tacitus desktop app runs these plugins natively: it discovers <code>.tacitus/plugins/*</code> in the open vault, shows each plugin's <strong>permissions before anything executes</strong> (scope badge + tool allowlist), and requires explicit approval — consent is pinned to the permission set, so a plugin update that asks for more triggers re-approval. Runs execute in the same sandbox described above; writes land in the app's live index instantly and appear in the Activity tab attributed as <code>plugin:&lt;name&gt;</code>, diffable and revertible like any agent write.</p>
+<p>Roadmap from here: version upgrades in the store, per-author signing, and a TS/Deno host. If you build something, open an issue — real integrations shape this design.</p>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>

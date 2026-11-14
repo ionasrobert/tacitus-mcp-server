@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Give Claude Code long-term memory, with sources · Tacitus</title>
+<meta name="description" content="Add persistent, sourced memory to Claude Code with one MCP server: install, a CLAUDE.md snippet, recall under a token budget, and revertible note edits.">
+<link rel="canonical" href="https://tacitus.md/guides/claude-code-memory.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="Give Claude Code long-term memory, with sources">
+<meta property="og:description" content="Add persistent, sourced memory to Claude Code with one MCP server: install, a CLAUDE.md snippet, recall under a token budget, and revertible note edits.">
+<meta property="og:url" content="https://tacitus.md/guides/claude-code-memory.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","headline":"Give Claude Code long-term memory, with sources","description":"Add persistent, sourced memory to Claude Code with one MCP server: install, a CLAUDE.md snippet, recall under a token budget, and revertible note edits.","datePublished":"2026-11-14","dateModified":"2026-11-14","mainEntityOfPage":"https://tacitus.md/guides/claude-code-memory.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://tacitus.md/guides/"},{"@type":"ListItem","position":3,"name":"Give Claude Code long-term memory, with sources","item":"https://tacitus.md/guides/claude-code-memory.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/">Docs</a>
+      <a href="/guides/" aria-current="page">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/guides/">Guides</a> /</p>
+<h1>Give Claude Code long-term memory, with sources</h1>
+<p class="updated">Guide · 2026-11-14</p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#1-pick-a-folder">1. Pick a folder</a></li><li><a href="#2-add-the-mcp-server-to-claude-code">2. Add the MCP server to Claude Code</a></li><li><a href="#3-tell-claude-when-to-remember-and-recall">3. Tell Claude when to remember and recall</a></li><li><a href="#4-what-a-remember-and-recall-round-trip-looks-like">4. What a remember and recall round trip looks like</a></li><li><a href="#5-let-claude-edit-notes-safely">5. Let Claude edit notes safely</a></li><li><a href="#6-quick-capture">6. Quick capture</a></li><li><a href="#7-optional-read-only-and-multi-device">7. Optional: read-only and multi-device</a></li><li><a href="#whats-next">What's next</a></li></ul></nav>
+<article class="prose">
+<p>Claude Code starts every session without memory of earlier ones, apart from what you put in <code>CLAUDE.md</code>. This guide adds a memory layer that lasts across sessions and projects: facts Claude stores with their source, which it can recall under a token budget, kept as plain Markdown in a folder you choose. Setup takes about two minutes. Everything below was run against the Tacitus npm server, version 0.2.0. The JSON is real output, trimmed.</p>
+<h2 id="1-pick-a-folder">1. Pick a folder</h2>
+<p>Tacitus works on an ordinary folder of Markdown files. You can use an existing notes folder or an Obsidian vault, or start an empty one:</p>
+<pre><code class="language-bash">mkdir -p ~/agent-memory</code></pre>
+<p>Your notes stay as plain <code>.md</code> files. Tacitus keeps its own state, such as memories, history and the audit log, in a hidden <code>.tacitus/</code> folder inside the vault. There is no account and no cloud dependency.</p>
+<h2 id="2-add-the-mcp-server-to-claude-code">2. Add the MCP server to Claude Code</h2>
+<p>With Node 22 or newer:</p>
+<pre><code class="language-bash">claude mcp add -s user tacitus -- npx -y @dashiro/tacitus-mcp-server ~/agent-memory</code></pre>
+<p><code>-s user</code> registers the server for every project, not only the current directory. A memory that disappears when you <code>cd</code> elsewhere isn't long-term.</p>
+<p>If you'd rather not depend on Node, install the native binary, a single file for macOS, Linux and Windows:</p>
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ionasrobert/tacitus-mcp-server/releases/latest/download/tacitus-mcp-installer.sh | sh
+claude mcp add -s user tacitus -- tacitus-mcp ~/agent-memory</code></pre>
+<p>Both servers expose the same 27 tools with the same arguments. The native binary also has end-to-end encrypted sync and a read-only mode, covered at the end.</p>
+<p>To check the setup, ask Claude to call the <code>capabilities</code> tool. It lists every tool and the current permission scope.</p>
+<h2 id="3-tell-claude-when-to-remember-and-recall">3. Tell Claude when to remember and recall</h2>
+<p>An MCP server only gives Claude tools. When to use them is up to you, and <code>CLAUDE.md</code> is where you say it. Here is a starting point to paste into <code>~/.claude/CLAUDE.md</code>. It's advice to adapt, not a requirement:</p>
+<pre><code class="language-markdown">## Long-term memory (Tacitus MCP)
+
+- At the start of a task, call `recall` with a short query about the task
+  and a `token_budget` of about 800. Treat results as claims with sources,
+  not as ground truth.
+- When I state a durable preference, decision or fact, call `remember` with
+  `type` (user | feedback | project | reference), a stable `key` when the
+  fact can change later (e.g. &quot;deploy-day&quot;), and
+  `source: { origin, author }`: origin says where it came from (a file path,
+  a URL, &quot;conversation 2026-11-14&quot;), author is &quot;human&quot; or &quot;agent&quot;.
+- If `recall` returns `conflicts`, show me both memories and ask which one
+  holds. Never pick one silently.
+- For quick notes and follow-ups, use `capture` (task: true for to-dos).</code></pre>
+<p>The <code>key</code> matters. Two memories with the same <code>key</code> and different content are reported as a conflict. Without a key, Tacitus can't tell that two facts contradict each other.</p>
+<h2 id="4-what-a-remember-and-recall-round-trip-looks-like">4. What a remember and recall round trip looks like</h2>
+<p><code>remember</code> won't store a fact without its source:</p>
+<pre><code class="language-json">{ &quot;ok&quot;: false, &quot;error&quot;: {
+  &quot;code&quot;: &quot;MISSING_PROVENANCE&quot;,
+  &quot;reason&quot;: &quot;A memory must carry its source (provenance).&quot;,
+  &quot;suggestion&quot;: &quot;Provide source: { origin, author: \&quot;human\&quot;|\&quot;agent\&quot;, timestamp? }.&quot; } }</code></pre>
+<p>With a source, you get back a stable id:</p>
+<pre><code class="language-json">// remember { content: &quot;Deploys go out on Tuesdays only.&quot;, type: &quot;project&quot;,
+//            key: &quot;deploy-day&quot;, source: { origin: &quot;standup 2026-11-14&quot;, author: &quot;human&quot; } }
+{ &quot;ok&quot;: true, &quot;data&quot;: { &quot;memory_id&quot;: &quot;mem_8a3ab0034c9aeb17&quot; } }</code></pre>
+<p>Calling the same thing again returns the same <code>memory_id</code> and creates no duplicate. The id is derived from type, key, content, origin and author, so Claude can retry safely.</p>
+<p>Now suppose a later session learns something different from a document, and you ask Claude when deploys go out:</p>
+<pre><code class="language-json">// recall { query: &quot;when do deploys go out&quot;, token_budget: 200 }
+{ &quot;items&quot;: [
+    { &quot;memory&quot;: { &quot;content&quot;: &quot;Deploys can go out any weekday after CI is green.&quot;,
+                  &quot;key&quot;: &quot;deploy-day&quot;,
+                  &quot;source&quot;: { &quot;origin&quot;: &quot;docs/RELEASING.md&quot;, &quot;author&quot;: &quot;agent&quot;,
+                              &quot;timestamp&quot;: &quot;2026-11-14T12:43:39.333Z&quot; } },
+      &quot;score&quot;: 3, &quot;token_count&quot;: 13 },
+    { &quot;memory&quot;: { &quot;content&quot;: &quot;Deploys go out on Tuesdays only.&quot;,
+                  &quot;key&quot;: &quot;deploy-day&quot;,
+                  &quot;source&quot;: { &quot;origin&quot;: &quot;standup 2026-11-14&quot;, &quot;author&quot;: &quot;human&quot;,
+                              &quot;timestamp&quot;: &quot;2026-11-14T12:43:39.331Z&quot; } },
+      &quot;score&quot;: 3, &quot;token_count&quot;: 8 } ],
+  &quot;conflicts&quot;: [ { &quot;key&quot;: &quot;deploy-day&quot;,
+                   &quot;memory_ids&quot;: [&quot;mem_4add74f8ddbe73cc&quot;, &quot;mem_8a3ab0034c9aeb17&quot;] } ] }</code></pre>
+<p>Note three things:</p>
+<ul><li><strong>Every item carries its source.</strong> Claude can say &quot;the standup said Tuesdays, but RELEASING.md says any weekday&quot;, which beats stating either one as fact.</li><li><strong>The contradiction is in <code>conflicts</code>.</strong> Neither memory was overwritten and Tacitus didn't pick a winner. Conflicts are computed over everything relevant to the query, so a tight <code>token_budget</code> can't hide one.</li><li><strong><code>token_budget</code> is a hard ceiling.</strong> Items that don't fit are skipped, and each one reports its own <code>token_count</code>.</li></ul>
+<p>Memories are stored as Markdown with YAML frontmatter in <code>.tacitus/memory/&lt;id&gt;.md</code>. You can read them, grep them and commit them to git. To drop one, Claude calls <code>forget</code> with its <code>memory_id</code>.</p>
+<h2 id="5-let-claude-edit-notes-safely">5. Let Claude edit notes safely</h2>
+<p>Recall covers what Claude knows. Your notes also need protecting when Claude changes them. Tacitus writes in two steps:</p>
+<pre><code class="language-json">// propose_changes { ops: [{ op: &quot;update&quot;, note_id: &quot;pricing&quot;,
+//                           content: &quot;Pro is 5 EUR per month or 48 EUR per year.&quot; }] }
+{ &quot;change_id&quot;: &quot;chg_e218429c49b297d6&quot;,
+  &quot;diff&quot;: [ { &quot;note_id&quot;: &quot;pricing&quot;, &quot;op&quot;: &quot;update&quot;,
+              &quot;before&quot;: &quot;# Pricing\n\nPro is 5 EUR per month. ...&quot;,
+              &quot;after&quot;: &quot;Pro is 5 EUR per month or 48 EUR per year.\n&quot; } ] }</code></pre>
+<p>Nothing is written until <code>commit_changes { change_id }</code>, which applies the whole changeset or none of it and returns a <code>version_id</code>. <code>revert { version_id }</code> restores the previous state. <code>audit_log</code> shows what the agent did:</p>
+<pre><code class="language-json">{ &quot;entries&quot;: [ { &quot;ts&quot;: &quot;2026-11-14T12:43:39.342Z&quot;, &quot;action&quot;: &quot;commit&quot;,
+                 &quot;version_id&quot;: &quot;v_ab0d4252ad7525eb&quot;, &quot;change_id&quot;: &quot;chg_e218429c49b297d6&quot;,
+                 &quot;notes&quot;: [&quot;pricing&quot;], &quot;scope&quot;: &quot;read-write&quot; } ] }</code></pre>
+<p>A useful rule for <code>CLAUDE.md</code>: &quot;Show me the <code>propose_changes</code> diff before you commit anything outside <code>daily/</code>.&quot;</p>
+<h2 id="6-quick-capture">6. Quick capture</h2>
+<p>You don't always want Claude to decide where a note belongs. <code>capture</code> appends one line to today's daily note:</p>
+<pre><code class="language-json">// capture { text: &quot;ask Ana whether yearly pricing ships with the beta&quot;, task: true }
+{ &quot;note_id&quot;: &quot;daily/2026-11-14&quot;, &quot;version_id&quot;: &quot;v_361bdde1ac736522&quot;,
+  &quot;line&quot;: &quot;- [ ] ask Ana whether yearly pricing ships with the beta&quot;, &quot;created&quot;: true }</code></pre>
+<p>With <code>task: true</code> the line is a checklist item, so <code>list_tasks</code> finds it later, including a <code>due:2026-11-20</code> if you put one in the text. Without it, the line is a timestamped bullet. Each capture is its own version, so one <code>revert</code> undoes it.</p>
+<h2 id="7-optional-read-only-and-multi-device">7. Optional: read-only and multi-device</h2>
+<ul><li><strong>Read-only mode (native binary).</strong> Start the server with <code>TACITUS_SCOPE=read-only</code>, for example <code>claude mcp add -s user tacitus -e TACITUS_SCOPE=read-only -- tacitus-mcp ~/agent-memory</code>. Writes (<code>commit_changes</code>, <code>create_note</code>, <code>capture</code> and the others, and from 0.27.2 also <code>remember</code> and <code>forget</code>) then fail with <code>PERMISSION_DENIED</code>, and <code>propose_changes</code> still works as a dry run. The npm server always runs read-write.</li><li><strong>Same memory on every machine (native binary).</strong> <code>tacitus-mcp sync init --vault ~/agent-memory</code> prints a vault code. Run <code>sync init --code …</code> on the second machine. The relay only stores ciphertext; see <a href="/docs/sync.html">how sync works</a>.</li></ul>
+<h2 id="whats-next">What's next</h2>
+<ul><li><a href="/guides/obsidian-mcp-server.html">Use your Obsidian vault as an MCP server</a>: wikilinks, properties, tasks and templates, as tools.</li><li><a href="/guides/agent-memory-provenance.html">Your agent's memory needs provenance</a>: why every memory carries its source and why contradictions are reported instead of resolved.</li><li><a href="/docs/mcp-api.html">MCP API reference</a>: every tool, argument and error code.</li></ul>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>

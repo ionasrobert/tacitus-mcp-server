@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>End-to-end encrypted sync for Markdown vaults · Tacitus</title>
+<meta name="description" content="How Tacitus syncs a Markdown vault between devices with CRDTs through a relay that only ever sees ciphertext — setup, live mode, compaction, quotas.">
+<link rel="canonical" href="https://tacitus.md/docs/sync.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="End-to-end encrypted sync for Markdown vaults">
+<meta property="og:description" content="How Tacitus syncs a Markdown vault between devices with CRDTs through a relay that only ever sees ciphertext — setup, live mode, compaction, quotas.">
+<meta property="og:url" content="https://tacitus.md/docs/sync.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","headline":"End-to-end encrypted sync for Markdown vaults","description":"How Tacitus syncs a Markdown vault between devices with CRDTs through a relay that only ever sees ciphertext — setup, live mode, compaction, quotas.","datePublished":"2026-08-14","dateModified":"2026-08-14","mainEntityOfPage":"https://tacitus.md/docs/sync.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://tacitus.md/docs/"},{"@type":"ListItem","position":3,"name":"End-to-end encrypted sync for Markdown vaults","item":"https://tacitus.md/docs/sync.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/" aria-current="page">Docs</a>
+      <a href="/guides/">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/docs/">Docs</a> /</p>
+<h1>End-to-end encrypted sync for Markdown vaults</h1>
+<p class="updated">Updated 2026-08-14 · <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md">source on GitHub</a></p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#quick-start">Quick start</a></li><li><a href="#the-vault-code-is-the-key">The vault code IS the key</a></li><li><a href="#what-syncs">What syncs</a></li><li><a href="#merge-semantics--no-conflicts-no-lost-edits-precisely">Merge semantics — &quot;no conflicts, no lost edits&quot;, precisely</a></li><li><a href="#presence-whos-online">Presence (who's online)</a></li><li><a href="#co-editing-keystroke-level">Co-editing (keystroke level)</a></li><li><a href="#compaction-bounded-relay-log">Compaction (bounded relay log)</a></li><li><a href="#protocol-for-relay-implementers">Protocol (for relay implementers)</a></li><li><a href="#caveats">Caveats</a></li></ul></nav>
+<article class="prose">
+<p>CRDT sync between your devices — end-to-end encrypted, relay-based, open-source and self-hostable. The relay never sees plaintext.</p>
+<h2 id="quick-start">Quick start</h2>
+<pre><code class="language-bash"># device 1
+tacitus-mcp sync init --vault ~/vault          # prints your vault code
+tacitus-mcp sync once --vault ~/vault
+
+# device 2 — paste the code from device 1
+tacitus-mcp sync init --vault ~/vault --code tacitus-xxxx-xxxx-…
+tacitus-mcp sync once --vault ~/vault
+
+# keep syncing in the background (30s scan interval)
+tacitus-mcp sync run --vault ~/vault
+
+# live mode: one persistent relay connection — remote edits land in ~1s
+tacitus-mcp sync run --live --vault ~/vault
+
+# force a relay-log compaction now (live sessions also do this on their own)
+tacitus-mcp sync compact --vault ~/vault
+
+# how full is this vault on the relay, and what is its quota?
+tacitus-mcp sync status --vault ~/vault
+
+# the checkout link for this vault's Pro quota (--open launches a browser)
+tacitus-mcp sync upgrade --vault ~/vault --plan yearly</code></pre>
+<p><code>--live</code> holds a single WebSocket open instead of a pass every tick: remote updates apply within a debounce (~250ms) of arriving, local edits are picked up by the scan tick (<code>--interval</code>, default 30s — there is no file watcher by design). The desktop app uses the same live session and nudges it after every save, so app-to-app convergence is sub-second.</p>
+<p>Default relay: <code>wss://sync.tacitus.md</code> (beta, free). Self-host with <code>--relay wss://your-host</code> — the relay is <code>crates/tacitus-relay</code> (Docker image included).</p>
+<h2 id="the-vault-code-is-the-key">The vault code IS the key</h2>
+<p><code>sync init</code> generates a ~160-bit code (<code>tacitus-xxxx-…</code>). Everything derives from it deterministically — same code on any device = same vault:</p>
+<pre><code>root       = argon2id(code, fixed salt v1)
+vault_key  = HKDF(root, &quot;tacitus/v1/vault-key&quot;)     # XChaCha20-Poly1305
+vault_id   = HKDF(root, &quot;tacitus/v1/vault-id&quot;)      # all the relay learns
+auth_token = HKDF(root, &quot;tacitus/v1/relay-token&quot;)   # one-way from root</code></pre>
+<ul><li>Anyone with the code can read (and write) the vault. Share it like a key.</li><li><strong>Lose the code and the relay's copy is permanently undecryptable.</strong> Your local files are plain Markdown on disk and are never at risk — re-run <code>sync init</code> for a fresh code and vault.</li><li>Note ids, device ids, and contents travel inside the ciphertext. The relay sees: vault_id, token, sequence numbers, blob sizes, timestamps, IPs.</li></ul>
+<h2 id="what-syncs">What syncs</h2>
+<ul><li>Notes (<code>**/*.md</code>, <code>.tacitus/</code> excluded)</li><li>Agent memories (<code>.tacitus/memory/*.md</code>) — your agents' memory follows you</li><li>NOT synced (device-local by design): history, audit log, embedding vectors, templates. Attachments (non-<code>.md</code> files) are not synced in v1.</li></ul>
+<h2 id="merge-semantics--no-conflicts-no-lost-edits-precisely">Merge semantics — &quot;no conflicts, no lost edits&quot;, precisely</h2>
+<p>Each note is a text CRDT (yrs). Local edits are captured as splices at scan time; concurrent edits always merge with both sides preserved — no conflict files, no blocked sync. Edits to the same few characters merge deterministically but can interleave; those notes are flagged for a human glance. Deletes are causal: an edit the deleter hadn't seen resurrects the note (edit wins); deleting after seeing the edits sticks.</p>
+<p>Remote changes are applied through the same transactional writer agents use: versioned in <code>.tacitus/history/</code>, revertible, and audited with <code>origin: &quot;sync&quot;</code>. Bulk bootstrap (&gt;200 notes) bypasses history and records one line in <code>.tacitus/sync/sync.log</code>.</p>
+<h2 id="presence-whos-online">Presence (who's online)</h2>
+<p>Devices in a vault see each other live: online, which note, editing or not. Presence is <strong>ephemeral</strong> — it never enters the relay log, carries no sequence number, and gets no ack. Payloads are E2E-encrypted like updates, under a separate AAD domain (<code>&quot;{vault_id}#presence&quot;</code>), so the relay learns nothing and a sync blob can never be replayed as presence. Departure is a <code>gone</code> goodbye on clean shutdown, or a 45s TTL when a device crashes. Requires a 0.20+ relay; against an older relay presence is silently off (sync itself is unaffected — see compatibility below).</p>
+<h2 id="co-editing-keystroke-level">Co-editing (keystroke level)</h2>
+<p>Two devices with the same note open co-edit live: keystroke updates (yjs v2) travel as ephemeral frames under their own AAD domain (<code>&quot;{vault_id}#coedit&quot;</code>), and a checkpointed diff lands in the durable log after ~2s of quiet — offline and third devices converge from the log alone, and a lost ephemeral frame is repaired by the next durable diff. Frames over 8 KiB (huge pastes) skip the fast tier and go durable immediately. Requires a 0.20+ relay; older peers ignore the frames (AEAD, like presence).</p>
+<p>Each room tracks its <strong>durable frontier</strong> (a mirror of exactly what the log covers): flushes diff against it, so a checkpoint a peer already pushed is never re-logged. Every room member is also a <strong>witness</strong> — if the author crashes before its own ~2s flush, a peer that saw the keystrokes ephemerally checkpoints them durably (on a 3× deadline, so the author usually wins and the witness flush no-ops). Room materializations are audited with <code>origin: &quot;coedit&quot;</code> (plain sync applies stay <code>&quot;sync&quot;</code>; after a crash, recovered applies are attributed <code>&quot;sync&quot;</code> — the attribution is cosmetic and deliberately not persisted).</p>
+<h2 id="compaction-bounded-relay-log">Compaction (bounded relay log)</h2>
+<p>The relay can't compact its own log — it never sees plaintext, so it can't merge CRDT updates. Compaction is <strong>client-driven</strong>: a caught-up client seals its full state (every doc + the tombstone manifest, so deletes survive) as one snapshot and offers it with <code>compact {upto_seq, blob}</code>. The relay stores the snapshot, drops every log entry at or below <code>upto_seq</code> (seqs never renumber; the previous log is kept one generation as <code>log.prev.jsonl</code>), and replies <code>compacted {upto_seq}</code>. Anyone whose cursor is below the snapshot gets <code>snapshot {upto_seq, blob}</code> before the tail — a snapshot is just a big idempotent update, so overlap is harmless and a fresh device converges from snapshot + tail alone.</p>
+<p>Live sessions compact automatically: <code>welcome.log_bytes</code> reports the log's size, and a caught-up session whose threshold (default 4 MB) is exceeded offers a snapshot once per session. <code>sync compact</code> forces one.</p>
+<p>Trust: the covered seq also travels <strong>inside</strong> the ciphertext (<code>snapshot_upto</code>) and clients advance their cursor only from that inner value — a hostile relay can't pin a forged <code>upto_seq</code> onto some other blob to leapfrog a client past entries it never delivered. (A hostile relay can still <em>withhold</em> data; that's inherent to relays and unchanged.)</p>
+<p>Limits: a snapshot that fits 32 MB travels as the single blob above, byte-identical to 0.22. Bigger vaults chunk (0.23+): docs are packed into separately-encrypted <strong>parts</strong> (≤32 MB each, ≤ the vault's quota in total — a snapshot never outgrows the log it replaces). Each part's set membership (<code>snapshot_part {upto, idx, of}</code>) travels inside its ciphertext, and a client advances its cursor ONLY after applying a complete consistent set — a relay withholding or splicing parts can stall a client, never skip it past content. The one remaining ceiling is a single note whose sealed CRDT state exceeds 32 MB (see Caveats).</p>
+<h2 id="protocol-for-relay-implementers">Protocol (for relay implementers)</h2>
+<p>WebSocket, JSON text frames, blobs base64. Client → <code>hello {vault_id, token, since_seq, caps}</code>; server → <code>welcome {latest_seq, caps, log_bytes}</code> + backlog <code>update {seq, blob}</code>… then live updates. Client <code>push {blob}</code> → <code>ack {seq}</code> + fanout to ALL of the vault's connections, pusher included (cursors advance only through the update stream). Auth is trust-on-first-use per vault. Per-vault append-only JSONL log, fsynced; per-vault storage quota (512 MB default), bounded in practice by compaction. Hosted tiers configure the quota: <code>TACITUS_RELAY_QUOTA_DEFAULT</code> sets the default in bytes, and an <code>entitlements.json</code> (<code>TACITUS_RELAY_ENTITLEMENTS</code>, default <code>&lt;data&gt;/entitlements.json</code>) grants per-vault overrides — <code>{&quot;version&quot;:1,&quot;vaults&quot;:{&quot;&lt;vault_id&gt;&quot;: {&quot;quota_bytes&quot;:N,&quot;tier&quot;:&quot;pro&quot;}}}</code>, hot-reloaded, so billing can rewrite it without a relay restart.</p>
+<p><strong>Extensions &amp; compatibility:</strong> new message <em>variants</em> are parse errors for old peers, so they are capability-gated: a client lists what it speaks in <code>hello.caps</code>, the relay lists what it supports in <code>welcome.caps</code> (both fields default to empty — 0.19 peers interoperate untouched). <code>presence {blob}</code> (both directions) is the first extension: the relay fans it out ONLY to connections that advertised the cap, never logs it, never assigns a seq, never acks it, and drops blobs over 8 KiB. Clients skip well-formed frames with unknown tags instead of dying, so future extensions stay deployable.</p>
+<p>The second extension is <code>compact</code> (see above): <code>compact {upto_seq, blob}</code> → <code>compacted {upto_seq}</code> or a structured refusal (<code>compact_stale</code>, <code>compact_ahead</code>, <code>snapshot_too_large</code>); <code>snapshot {upto_seq, blob}</code> is only ever sent to connections that advertised the cap. A capless client whose <code>since_seq</code> is below the snapshot gets <code>err {code: &quot;compacted&quot;}</code> — an honest fatal error instead of a silent gap (0.21 and older clients below a compaction must upgrade; at or past it they work untouched). WS frame limits are raised to 64 MiB on both ends to fit snapshots.</p>
+<p>The third extension is <code>compact2</code> (0.23+), a strict superset of <code>compact</code> for chunked snapshots: the client uploads <code>compact_part {upto_seq, idx, of, blob}</code> in order 0..of-1 on one connection; the relay stages parts on disk, commits atomically on the last one, and replies <code>compacted</code> or a structured refusal (<code>compact_part_order</code>, <code>compact_part_too_large</code>, <code>compact_too_large</code>, plus the stale/ahead pair). A disconnect mid-upload discards the staging. Multi-part snapshots are served as <code>snapshot_part {upto_seq, idx, of, blob}</code> sequences, and ONLY to compact2 connections — single-part snapshots keep the legacy <code>snapshot</code> frame for every compact-capable client, so serving below 32 MB is unchanged. A compact-only client below a multi-part snapshot gets <code>err {code: &quot;compacted&quot;}</code>, exactly like a capless 0.21 client below any snapshot. Refusals of a compaction offer are advisory on both paths: the log is untouched, the connection survives, and a live session shrugs them off (losing the compaction race to another device is that device doing the job).</p>
+<p>The fourth extension is <code>quota</code> (0.24+), for per-vault storage quotas: <code>welcome.quota_bytes</code> reports the vault's effective quota (defaults to 0 = &quot;relay predates quotas&quot;; a real quota is never 0), and an over-quota <code>push</code> is refused — <code>err {code:&quot;quota_exceeded&quot;}</code> to clients that advertised the cap, the legacy <code>err {code:&quot;log_full&quot;}</code> to everyone else (an unknown err code is fatal to old clients, so the new one is never sent unasked). The refusal consumes no sequence number and the connection survives. Client side, the same numbers are readable without syncing: <code>sync status</code> opens a connection, reads the welcome, and hangs up — no frame reaches the engine, so the cursor never moves and nothing is written. It prints <code>storage: &lt;used&gt; of &lt;quota&gt; (N%)</code>, and past 80% it prints the checkout link for that vault (<code>sync upgrade</code> prints it on demand). Those links appear <strong>only</strong> for <code>sync.tacitus.md</code> or when <code>TACITUS_BILLING_URL</code> names an operator's own billing sidecar: a self-hosted relay has no quota to sell and never advertises one.</p>
+<p>Compaction is deliberately <strong>exempt</strong> from the quota — it is the cure — only the snapshot itself must fit (<code>compact_too_large</code> otherwise, already advisory). A live client answers the first refusal by emitting <code>QuotaExceeded</code> and offering one compaction immediately (bypassing its size threshold — the refused push blocks catch-up, so the normal trigger can never run), re-sends its pending pushes once the relay confirms <code>compacted</code>, and treats only a refusal after a failed heal as fatal: upgrade the tier or shrink the vault. Reads are never gated — an over-quota vault still serves its full backlog.</p>
+<h2 id="caveats">Caveats</h2>
+<ul><li>Don't point sync at a vault that's also inside Dropbox/iCloud sync — cooperating writers only.</li><li>One sync process per vault per device: don't run <code>sync run</code> (live or not) against a vault the desktop app is already live-syncing — two engines race on the same <code>.tacitus/sync/</code> state.</li><li>A single note whose sealed CRDT state exceeds 32 MB can't ride a snapshot (a doc never splits across parts) — such a vault doesn't compact and grows toward its quota. Whole-vault size stopped mattering in 0.23: bigger states just chunk.</li><li>Don't downgrade a relay below 0.23 while a chunked snapshot is stored: a 0.22 relay can't read the v2 <code>snapshot.json</code> and would serve the truncated log as if nothing were missing. Single-part snapshots keep the 0.22 file format, so vaults under 32 MB are downgrade-safe.</li><li>A vault whose <strong>sealed state</strong> exceeds its quota can't compact under it: pushes stay refused (each live session surfaces <code>QuotaExceeded</code>, then ends with a <code>quota_exceeded</code> error) until the tier is raised or the vault shrinks. Local files are never at risk — sync just stops uploading.</li><li>Operators: the quota bounds <code>log.jsonl</code> and the snapshot total <em>separately</em>, and one previous log generation (<code>log.prev.jsonl</code>) is kept for recovery — so worst-case disk per vault is ≈ 3× its quota. Size a &quot;100 MB&quot; tier's hosting accordingly.</li></ul>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>

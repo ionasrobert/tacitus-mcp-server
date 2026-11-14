@@ -3,8 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tacitus — long-term memory for AI agents</title>
-<meta name="description" content="Tacitus turns any folder of Markdown into an agent-native knowledge base: memory with provenance, retrieval under token budgets, revertible write-back, and E2E-encrypted sync. MIT, local-first.">
+<title>Tacitus — long-term memory MCP server for AI agents</title>
+<meta name="description" content="Open-source MCP server that gives Claude Code and other AI agents long-term memory over Markdown or Obsidian: sourced facts, token budgets, revertible edits.">
+<link rel="canonical" href="https://tacitus.md/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="Tacitus — long-term memory MCP server for AI agents">
+<meta property="og:description" content="Open-source MCP server that gives Claude Code and other AI agents long-term memory over Markdown or Obsidian: sourced facts, token budgets, revertible edits.">
+<meta property="og:url" content="https://tacitus.md/">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Tacitus — your agents forget; give them a historian. Long-term memory MCP server.">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">{"@context": "https://schema.org", "@graph": [{"@type": "SoftwareApplication", "name": "Tacitus", "url": "https://tacitus.md/", "description": "Open-source MCP server that gives Claude Code and other AI agents long-term memory over Markdown or Obsidian: sourced facts, token budgets, revertible edits.", "applicationCategory": "DeveloperApplication", "operatingSystem": "macOS, Linux, Windows", "softwareVersion": "0.27.1", "license": "https://opensource.org/licenses/MIT", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "EUR"}, "downloadUrl": "https://github.com/ionasrobert/tacitus-mcp-server/releases/latest", "codeRepository": "https://github.com/ionasrobert/tacitus-mcp-server", "sameAs": ["https://github.com/ionasrobert/tacitus-mcp-server", "https://www.npmjs.com/package/@dashiro/tacitus-mcp-server"]}, {"@type": "WebSite", "name": "Tacitus", "url": "https://tacitus.md/"}]}</script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
 <style>
   :root {
@@ -56,7 +68,7 @@
   .nav { display: flex; align-items: baseline; gap: 1.5rem; padding: 1.1rem 0; font-family: var(--sans); font-size: .9rem; }
   .brand { font-family: var(--serif); font-size: 1.15rem; font-weight: 700; letter-spacing: .01em; color: var(--ink); text-decoration: none; }
   .brand .seal { color: var(--patina); }
-  .nav .links { margin-left: auto; display: flex; gap: 1.25rem; }
+  .nav .links { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem 1.25rem; }
   .nav .links a { color: var(--graphite); text-decoration: none; }
   .nav .links a:hover { color: var(--patina); }
 
@@ -227,6 +239,8 @@
       <a href="#sync">Sync</a>
       <a href="#pro">Pro</a>
       <a href="#start">Quick start</a>
+      <a href="/docs/">Docs</a>
+      <a href="/guides/">Guides</a>
       <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
     </nav>
   </div>
@@ -235,7 +249,8 @@
 <main>
   <div class="wrap hero">
     <h1>Your agents forget.<br>Give them a <em>historian</em>.</h1>
-    <p class="sub">Tacitus turns any folder of Markdown into long-term memory for AI agents —
+    <p class="sub">Tacitus is an open-source MCP server that turns any folder of Markdown — an
+      Obsidian vault included — into long-term memory for AI agents —
       <strong>every fact carries its source</strong>, every write is audited and revertible,
       and notes stay plain files on your disk. No cloud, no lock-in.</p>
 
@@ -427,9 +442,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
     <div class="cols">
       <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
       <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
-      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md">API reference</a>
-      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/PLUGINS.md">Plugins</a>
-      <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/SYNC.md">Sync</a>
+      <a href="/docs/mcp-api.html">API reference</a>
+      <a href="/docs/plugins.html">Plugins</a>
+      <a href="/docs/sync.html">Sync</a>
+      <a href="/guides/">Guides</a>
       <a href="/terms.html">Terms</a>
       <a href="/privacy.html">Privacy</a>
       <a href="/refunds.html">Cancellation &amp; refunds</a>

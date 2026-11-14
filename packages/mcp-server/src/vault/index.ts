@@ -5,10 +5,20 @@ import type { Note } from './types';
 
 /**
  * An in-memory snapshot of a vault's notes plus its wikilink graph.
- * Built once at startup; file-watching / incremental updates come later.
+ * The server calls refresh() before every tool call, so edits made outside
+ * Tacitus (Obsidian, an editor, git pull) are visible immediately — the same
+ * per-call rebuild the native engine does.
  */
 export class VaultIndex {
-  private constructor(private readonly notes: Map<string, Note>) {}
+  private constructor(
+    private notes: Map<string, Note>,
+    private readonly vaultDir: string,
+  ) {}
+
+  /** Re-read the vault from disk, replacing the snapshot in place. */
+  async refresh(): Promise<void> {
+    this.notes = (await VaultIndex.build(this.vaultDir)).notes;
+  }
 
   static async build(vaultDir: string): Promise<VaultIndex> {
     let entries: string[] = [];
@@ -27,7 +37,7 @@ export class VaultIndex {
       const note = parseNote(raw, relPath);
       notes.set(note.id, note);
     }
-    return new VaultIndex(notes);
+    return new VaultIndex(notes, vaultDir);
   }
 
   all(): Note[] {

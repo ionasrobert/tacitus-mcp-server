@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>On-disk data format — notes, memories, history · Tacitus</title>
+<meta name="description" content="The plain files Tacitus keeps in your vault: Markdown notes, typed memories with provenance, version snapshots and the audit log — no database, no lock-in.">
+<link rel="canonical" href="https://tacitus.md/docs/data-format.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Tacitus">
+<meta property="og:title" content="On-disk data format — notes, memories, history">
+<meta property="og:description" content="The plain files Tacitus keeps in your vault: Markdown notes, typed memories with provenance, version snapshots and the audit log — no database, no lock-in.">
+<meta property="og:url" content="https://tacitus.md/docs/data-format.html">
+<meta property="og:image" content="https://tacitus.md/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232F7A68'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23FBFAF7' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/legal.css">
+<link rel="stylesheet" href="/page.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","headline":"On-disk data format — notes, memories, history","description":"The plain files Tacitus keeps in your vault: Markdown notes, typed memories with provenance, version snapshots and the audit log — no database, no lock-in.","datePublished":"2026-07-24","dateModified":"2026-07-24","mainEntityOfPage":"https://tacitus.md/docs/data-format.html","image":"https://tacitus.md/og.png","author":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"publisher":{"@type":"Organization","name":"Tacitus","url":"https://tacitus.md"},"about":{"@type":"SoftwareApplication","name":"Tacitus","url":"https://tacitus.md"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://tacitus.md/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://tacitus.md/docs/"},{"@type":"ListItem","position":3,"name":"On-disk data format — notes, memories, history","item":"https://tacitus.md/docs/data-format.html"}]}]}</script>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">Tacitus<span class="seal">.</span></a>
+    <nav class="links" aria-label="Site">
+      <a href="/docs/" aria-current="page">Docs</a>
+      <a href="/guides/">Guides</a>
+      <a href="https://github.com/ionasrobert/tacitus-mcp-server">GitHub</a>
+      <a href="https://www.npmjs.com/package/@dashiro/tacitus-mcp-server">npm</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+<p class="crumbs"><a href="/docs/">Docs</a> /</p>
+<h1>On-disk data format — notes, memories, history</h1>
+<p class="updated">Updated 2026-07-24 · <a href="https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/DATA_FORMAT.md">source on GitHub</a></p>
+<nav class="toc" aria-label="On this page"><p>On this page</p><ul><li><a href="#notes">Notes</a></li><li><a href="#stable-ids">Stable ids</a></li><li><a href="#tacitusmemorymemory_idmd">.tacitus/memory/&lt;memory_id&gt;.md</a></li><li><a href="#tacitushistoryversion_idjson">.tacitus/history/&lt;version_id&gt;.json</a></li><li><a href="#tacitusauditlog">.tacitus/audit.log</a></li><li><a href="#tacitustemplatesnamemd">.tacitus/templates/&lt;name&gt;.md</a></li><li><a href="#tacitusvectorsjson">.tacitus/vectors/.json</a></li><li><a href="#writing-directly-vs-through-mcp">Writing directly vs through MCP</a></li></ul></nav>
+<article class="prose">
+<p>Everything Tacitus knows lives in <strong>plain files inside the user's vault</strong> — no database, no cloud, no lock-in. This spec lets you build tools that read (or carefully write) the same data. When in doubt, prefer the MCP tools: they add validation, versioning, and audit that raw file writes bypass.</p>
+<pre><code>your-vault/
+├── **/*.md                  ← notes (user-owned, standard Markdown + YAML)
+└── .tacitus/                ← Tacitus's own data (never indexed as notes)
+    ├── memory/*.md          ← agent memories
+    ├── history/*.json       ← version snapshots (revert)
+    ├── audit.log            ← JSONL log of every write
+    ├── templates/*.md       ← note templates
+    └── vectors/*.json       ← embedding cache (npm neural embedder)</code></pre>
+<h2 id="notes">Notes</h2>
+<ul><li>A note is any <code>*.md</code> file in the vault (recursively), except under <code>.tacitus/</code>.</li><li><strong><code>note_id</code></strong> = vault-relative path without the <code>.md</code> extension, <code>/</code> separators (<code>projects/launch</code>). This is the stable address used everywhere.</li><li><strong>Frontmatter</strong>: optional leading <code>---\n&lt;YAML&gt;\n---\n</code> block. Typed values (numbers, booleans, arrays) are preserved and queryable via <code>properties_query</code>.</li><li><strong>Title resolution</strong>: frontmatter <code>title</code> → first <code># H1</code> → filename.</li><li><strong>Wikilinks</strong>: <code>[[target]]</code>, <code>[[target|alias]]</code>, <code>[[target#heading]]</code>, <code>[[target#^block-id]]</code>. Target resolution: exact note_id first, then basename match (case-insensitive) — <code>[[Launch]]</code> finds <code>projects/launch</code>.</li><li><strong>Tags</strong>: frontmatter <code>tags:</code> (array or delimited string) plus inline <code>#tag</code> (<code>[A-Za-z0-9_/-]+</code>).</li><li><strong>Tasks</strong>: any checklist line <code>- [ ] text</code> / <code>* [x] text</code> (leading whitespace allowed). Parsed metadata inside the text: due date as <code>due:YYYY-MM-DD</code> or <code>📅 YYYY-MM-DD</code>; inline <code>#tags</code>.</li></ul>
+<h2 id="stable-ids">Stable ids</h2>
+<p><code>stable_id(seed, prefix)</code> = <code>prefix + &quot;_&quot; + first 16 hex chars of sha256(seed)</code>. Deterministic and <strong>bit-identical between the Rust and TypeScript engines</strong>, so ids are portable across both.</p>
+<div class="table"><table><thead><tr><th>Prefix</th><th>Entity</th><th>Seed</th></tr></thead><tbody><tr><td><code>mem_</code></td><td>memory</td><td><code>&quot;{type} {key} {content} {origin} {author}&quot;</code> (timestamp excluded → idempotent)</td></tr><tr><td><code>chg_</code></td><td>proposed changeset</td><td>JSON of the changeset</td></tr><tr><td><code>v_</code></td><td>committed version</td><td><code>&quot;{change_id}:{unix_millis}&quot;</code></td></tr></tbody></table></div>
+<h2 id="tacitusmemorymemory_idmd"><code>.tacitus/memory/&lt;memory_id&gt;.md</code></h2>
+<p>One memory per file, Markdown + YAML frontmatter; the body is the memory content. Files are written atomically (temp + rename); corrupt files are skipped on load, never fatal.</p>
+<pre><code class="language-markdown">---
+id: mem_2c26b46b68ffc68f
+type: project            # user | feedback | project | reference
+tags: [launch]
+key: launch-date         # optional; same-key disagreements are surfaced as conflicts
+source:                  # provenance is MANDATORY
+  origin: session-2026-07-24
+  author: agent          # human | agent
+  timestamp: 2026-07-24T10:00:00Z
+ttl: 2592000             # optional, seconds
+---
+The launch is planned for March.</code></pre>
+<h2 id="tacitushistoryversion_idjson"><code>.tacitus/history/&lt;version_id&gt;.json</code></h2>
+<p>One snapshot per committed version — enough to undo it. <code>before</code>/<code>after</code> map <code>note_id</code> → the note's full raw file contents, or <code>null</code> for absent/deleted.</p>
+<pre><code class="language-json">{
+  &quot;version_id&quot;: &quot;v_8bb16e08588a2576&quot;,
+  &quot;change_id&quot;: &quot;chg_3327cebb0ed078e6&quot;,
+  &quot;before&quot;: { &quot;projects/launch&quot;: null },
+  &quot;after&quot;:  { &quot;projects/launch&quot;: &quot;---\ntitle: Launch\n---\nBody.\n&quot; }
+}</code></pre>
+<p>Reverting applies <code>before</code>; a revert does not create a new snapshot.</p>
+<h2 id="tacitusauditlog"><code>.tacitus/audit.log</code></h2>
+<p>Append-only JSONL — one line per commit or revert. This is the trust surface: every agent (and app) write lands here.</p>
+<pre><code class="language-json">{&quot;ts&quot;:&quot;2026-07-24T10:00:00Z&quot;,&quot;action&quot;:&quot;commit&quot;,&quot;version_id&quot;:&quot;v_8bb1...&quot;,&quot;change_id&quot;:&quot;chg_3327...&quot;,&quot;notes&quot;:[&quot;projects/launch&quot;],&quot;scope&quot;:&quot;read-write&quot;}
+{&quot;ts&quot;:&quot;2026-07-24T10:05:00Z&quot;,&quot;action&quot;:&quot;revert&quot;,&quot;version_id&quot;:&quot;v_8bb1...&quot;,&quot;notes&quot;:[&quot;projects/launch&quot;],&quot;scope&quot;:&quot;read-write&quot;}</code></pre>
+<h2 id="tacitustemplatesnamemd"><code>.tacitus/templates/&lt;name&gt;.md</code></h2>
+<p>A template is an ordinary Markdown file whose <code>{{var}}</code> placeholders form its schema (vars are inferred by scanning — no separate manifest). Rendering substitutes on the <strong>raw text, frontmatter included</strong>, so numeric placeholders produce typed YAML. Builtins <code>{{date}}</code>, <code>{{time}}</code>, <code>{{datetime}}</code> auto-fill when not supplied.</p>
+<pre><code class="language-markdown">---
+title: &quot;{{title}}&quot;
+status: draft
+priority: {{p}}
+---
+# {{title}}
+Created {{date}}.</code></pre>
+<h2 id="tacitusvectorsjson"><code>.tacitus/vectors/*.json</code></h2>
+<p>Embedding cache used by the npm server's opt-in neural embedder (<code>TACITUS_EMBEDDER=transformers</code>): a JSON object mapping content-hash keys (<code>v_&lt;16hex&gt;</code> of the text) to vectors. Safe to delete — it regenerates.</p>
+<h2 id="writing-directly-vs-through-mcp">Writing directly vs through MCP</h2>
+<p>Direct file writes are legitimate (it's the user's vault) but bypass versioning and audit. Rules of thumb:</p>
+<ul><li><strong>Reads</strong>: parse freely; the formats above are stable.</li><li><strong>Note writes from tools/plugins</strong>: go through MCP (<code>create_note</code>, <code>propose_changes</code>, …) so users get diffs, versions, and an audit trail.</li><li>If you must write files directly, write atomically (temp file + rename) — that's what both engines and the desktop app do.</li><li>Concurrency: Tacitus assumes cooperating writers on a local filesystem. <code>commit_changes</code> re-validates against disk before applying, and <code>toggle_task</code> carries a text guard, but there is no cross-process lock — avoid running multiple uncoordinated writers against one vault.</li></ul>
+</article>
+  </div>
+</main>
+<footer>
+  <div class="wrap foot">
+    <span>Tacitus — long-term memory for AI agents · MIT</span>
+    <span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/guides/">Guides</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></span>
+  </div>
+</footer>
+</body>
+</html>
