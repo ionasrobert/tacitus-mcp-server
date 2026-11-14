@@ -27,7 +27,7 @@ export function rememberTool(store: MemoryStore): Tool {
   return {
     name: 'remember',
     description:
-      'Store a typed memory (user|feedback|project|reference) with mandatory provenance. Returns a stable memory_id; idempotent for identical content+source.',
+      'Store a typed memory (user|feedback|project|reference) with mandatory provenance. Idempotent for identical content+source.',
     inputSchema: RememberInput,
     handler: async (input) => {
       const memory = remember(input);

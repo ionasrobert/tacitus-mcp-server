@@ -17,10 +17,10 @@ use serde_json::{json, Value};
 
 use tacitus_core::error::TacitusError;
 use tacitus_core::tools::args::{
-    AuditArgs, CommitArgs, CreateFromTemplateArgs, CreateNoteArgs, DeleteNoteArgs, ForgetArgs,
-    GetNoteArgs, GetVersionArgs, GraphArgs, LinkArgs, ListTasksArgs, PropertiesArgs, ProposeArgs,
-    RecallQuery, RememberArgs, RenameNoteArgs, RevertArgs, SearchToolArgs, SuggestLinksArgs,
-    TagArgs, ToggleTaskArgs, UpdateNoteArgs,
+    AuditArgs, CaptureArgs, CommitArgs, CreateFromTemplateArgs, CreateNoteArgs, DeleteNoteArgs,
+    ForgetArgs, GetNoteArgs, GetVersionArgs, GraphArgs, LinkArgs, ListTasksArgs, PropertiesArgs,
+    ProposeArgs, RecallQuery, RememberArgs, RenameNoteArgs, RevertArgs, SearchToolArgs,
+    SuggestLinksArgs, TagArgs, ToggleTaskArgs, UpdateNoteArgs,
 };
 use tacitus_core::tools::ToolRegistry;
 use tacitus_core::vault::{HashingEmbedder, PermissionScope};
@@ -246,6 +246,20 @@ impl TacitusServer {
         envelope(self.registry.get_version(args))
     }
 
+    #[tool(
+        description = "List declared note types (.tacitus/types/*.yaml): each property's type (string|number|boolean|date|list), required, enum. Creates/updates of a note whose frontmatter `type` names a declared type are validated; violations return SCHEMA_VIOLATION listing every problem."
+    )]
+    async fn list_types(&self) -> CallToolResult {
+        envelope(self.registry.list_types())
+    }
+
+    #[tool(
+        description = "Quick capture: append a line to a daily note (daily/YYYY-MM-DD, default today; created on first capture, from the `daily` template if one exists). task=true appends a `- [ ]` checklist item that list_tasks sees; otherwise a timestamped bullet. Versioned + audited. Returns note_id, version_id and the line written."
+    )]
+    async fn capture(&self, Parameters(args): Parameters<CaptureArgs>) -> CallToolResult {
+        envelope(self.registry.capture(args))
+    }
+
     #[tool(description = "List available tools and the current permission scope.")]
     async fn capabilities(&self) -> CallToolResult {
         envelope(self.registry.capabilities(None))
@@ -318,6 +332,42 @@ mod tests {
     /// rmcp's `#[tool]` descriptions are literal-only, so they duplicate the
     /// registry's descriptor table. This test makes drift impossible: names
     /// AND descriptions of the live router must equal the shared registry.
+    /// Every property schema must be an object: the JS MCP SDK (≥ 1.32)
+    /// rejects the WHOLE tools/list when one is a bare `true` — which is what
+    /// schemars emits for an undocumented `serde_json::Value` field. That
+    /// once made every tool invisible to JS-based clients.
+    #[test]
+    fn every_property_schema_is_an_object() {
+        fn walk(path: &str, schema: &serde_json::Value, bad: &mut Vec<String>) {
+            let Some(obj) = schema.as_object() else {
+                return;
+            };
+            for key in ["properties", "$defs", "definitions"] {
+                if let Some(props) = obj.get(key).and_then(|p| p.as_object()) {
+                    for (name, sub) in props {
+                        let here = format!("{path}.{key}.{name}");
+                        if sub.is_boolean() {
+                            bad.push(here.clone());
+                        }
+                        walk(&here, sub, bad);
+                    }
+                }
+            }
+            if let Some(items) = obj.get("items") {
+                if items.is_boolean() {
+                    bad.push(format!("{path}.items"));
+                }
+                walk(&format!("{path}.items"), items, bad);
+            }
+        }
+        let mut bad = Vec::new();
+        for tool in TacitusServer::tool_router().list_all() {
+            let schema = serde_json::Value::Object((*tool.input_schema).clone());
+            walk(&tool.name, &schema, &mut bad);
+        }
+        assert!(bad.is_empty(), "boolean property schemas: {bad:?}");
+    }
+
     #[test]
     fn router_matches_registry_descriptors() {
         let router = TacitusServer::tool_router().list_all(); // sorted by name

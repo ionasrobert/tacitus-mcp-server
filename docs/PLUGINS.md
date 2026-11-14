@@ -234,7 +234,7 @@ len` packed into an `i64`.
 | `call` | `(tool_ptr, tool_len, args_ptr, args_len: i32) -> i64` | run an allowlisted tool; **always** returns an envelope — denial is `PERMISSION_DENIED` data, never a trap |
 | `log` | `(level: i32, ptr: i32, len: i32)` | 0=debug 1=info 2=warn 3=error; captured by the host |
 
-**All 25 tools of [MCP_API.md](./MCP_API.md) are reachable in the sandbox** —
+**All 27 tools of [MCP_API.md](./MCP_API.md) are reachable in the sandbox** —
 the host and the MCP server share one registry (`tacitus_core::tools`), so the
 surfaces cannot diverge. The manifest allowlist gates which of them a plugin
 may call; the 12 write tools (`remember`, `forget`, `commit_changes`,

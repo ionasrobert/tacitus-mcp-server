@@ -85,6 +85,13 @@ pub struct ChangeOpArg {
     pub op: String,
     pub note_id: String,
     pub content: Option<String>,
+    /// YAML frontmatter as a JSON object (e.g. {"type": "idea", "tags": ["x"]}).
+    // An object schema, not schemars' `true` for Value: the JS MCP SDK
+    // rejects a whole tools/list when a property schema is a bare boolean.
+    #[cfg_attr(
+        feature = "schemas",
+        schemars(with = "Option<serde_json::Map<String, Value>>")
+    )]
     pub frontmatter: Option<Value>,
 }
 
@@ -111,6 +118,13 @@ pub struct RevertArgs {
 pub struct CreateNoteArgs {
     pub note_id: String,
     pub content: String,
+    /// YAML frontmatter as a JSON object (e.g. {"type": "idea", "tags": ["x"]}).
+    // An object schema, not schemars' `true` for Value: the JS MCP SDK
+    // rejects a whole tools/list when a property schema is a bare boolean.
+    #[cfg_attr(
+        feature = "schemas",
+        schemars(with = "Option<serde_json::Map<String, Value>>")
+    )]
     pub frontmatter: Option<Value>,
 }
 
@@ -119,6 +133,13 @@ pub struct CreateNoteArgs {
 pub struct UpdateNoteArgs {
     pub note_id: String,
     pub content: Option<String>,
+    /// YAML frontmatter as a JSON object (e.g. {"type": "idea", "tags": ["x"]}).
+    // An object schema, not schemars' `true` for Value: the JS MCP SDK
+    // rejects a whole tools/list when a property schema is a bare boolean.
+    #[cfg_attr(
+        feature = "schemas",
+        schemars(with = "Option<serde_json::Map<String, Value>>")
+    )]
     pub frontmatter: Option<Value>,
 }
 
@@ -148,6 +169,7 @@ pub struct PropFilterArg {
     pub key: String,
     /// eq | ne | contains | exists | not_exists | gt | lt | gte | lte
     pub op: String,
+    /// Comparison value (string, number, bool…); unused for exists/not_exists.
     pub value: Option<Value>,
 }
 
@@ -220,4 +242,15 @@ pub struct GetVersionArgs {
 #[cfg_attr(feature = "schemas", derive(schemars::JsonSchema))]
 pub struct DeleteNoteArgs {
     pub note_id: String,
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schemas", derive(schemars::JsonSchema))]
+pub struct CaptureArgs {
+    /// The thought, link or task to capture (folded onto one line).
+    pub text: String,
+    /// true = a `- [ ]` task (list_tasks sees it); default a timestamped bullet.
+    pub task: Option<bool>,
+    /// YYYY-MM-DD; default today (local time).
+    pub date: Option<String>,
 }

@@ -6,10 +6,10 @@ every tool as a typed method, structured errors you can branch on, one import.
 ```ts
 import { TacitusClient, TacitusToolError } from '@dashiro/tacitus-sdk';
 
-// Native binary (all 25 tools) — https://github.com/ionasrobert/tacitus-mcp-server/releases
+// Native binary (all 27 tools) — https://github.com/ionasrobert/tacitus-mcp-server/releases
 const tacitus = await TacitusClient.spawn({ vault: '/path/to/vault' });
 
-// …or the npm server (core 16 tools), zero install:
+// …or the npm server (same 27 tools), zero install:
 // await TacitusClient.spawn({
 //   vault: '/path/to/vault',
 //   command: 'npx',
@@ -38,12 +38,13 @@ await tacitus.close();
 
 ## What you get
 
-- **25 typed methods** mirroring [docs/MCP_API.md](https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md):
+- **27 typed methods** mirroring [docs/MCP_API.md](https://github.com/ionasrobert/tacitus-mcp-server/blob/main/docs/MCP_API.md):
   retrieval (`search`, `getNote`, `graphQuery`, `suggestLinks`, `listNotes`),
   agent memory with provenance (`remember`, `recall`, `forget`),
   transactional write-back (`proposeChanges` → `commitChanges` → `revert`,
   plus `createNote`/`updateNote`/`link`/`tag`/`auditLog`), properties, tasks,
-  templates, rename/delete, `getVersion`, `capabilities`.
+  templates, rename/delete, `getVersion`, declared types (`listTypes`),
+  quick capture into daily notes (`capture`), `capabilities`.
 - **Envelope unwrapping**: tools return `{ ok, data | error }` — the SDK gives
   you `data` typed, or throws `TacitusToolError { code, reason, suggestion }`.
 - **Any transport**: `TacitusClient.connect(transport)` accepts any MCP
@@ -54,10 +55,10 @@ await tacitus.close();
 
 | Server | Tools | Scope control |
 |---|---|---|
-| `tacitus-mcp` native binary (GitHub Releases) | all 25 | `TACITUS_SCOPE=read-only` honored |
-| `@dashiro/tacitus-mcp-server` (npx) | core 16 | always read-write |
+| `tacitus-mcp` native binary (GitHub Releases) | all 27 | `TACITUS_SCOPE=read-only` honored |
+| `@dashiro/tacitus-mcp-server` (npx) ≥ 0.2.0 | all 27 | always read-write |
 
-Calling a native-first tool against the npm server throws
+Older npm servers (≤ 0.1.x) serve 16 tools; calling a missing one throws
 `TacitusToolError` with code `TOOL_UNAVAILABLE`.
 
 MIT · part of the [tacitus-mcp-server](https://github.com/ionasrobert/tacitus-mcp-server) monorepo.

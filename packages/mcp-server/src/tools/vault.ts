@@ -10,7 +10,7 @@ export function searchTool(index: VaultIndex, embedder?: Embedder): Tool {
   return {
     name: 'search',
     description:
-      'Search vault notes by relevance; returns ranked snippets within an optional token_budget (never whole notes). mode: hybrid (default) | lexical | semantic. Expand with get_note.',
+      'Search vault notes by relevance; ranked snippets within an optional token_budget (never whole notes). mode: hybrid (default) | lexical | semantic. Expand with get_note.',
     inputSchema: z.object({
       query: z.string(),
       mode: z.enum(['lexical', 'semantic', 'hybrid']).optional(),
@@ -31,7 +31,7 @@ export function getNoteTool(index: VaultIndex): Tool {
   return {
     name: 'get_note',
     description:
-      'Fetch a note progressively: outline (headings) | frontmatter_only | full, with an optional max_tokens ceiling.',
+      'Fetch a note progressively: outline | frontmatter_only | full, with an optional max_tokens ceiling.',
     inputSchema: z.object({
       note_id: z.string(),
       format: z.enum(['outline', 'frontmatter_only', 'full']).optional(),

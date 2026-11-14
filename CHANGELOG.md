@@ -4,6 +4,42 @@ Notable changes per release. Every `vX.Y.Z` tag builds native installers via
 GitHub Releases; the npm server (`@dashiro/tacitus-mcp-server`) versions
 independently. Sync protocol details live in [docs/SYNC.md](docs/SYNC.md).
 
+## 0.27.0 + npm 0.2.0 — 2026-11-14
+
+- **Security: ids can no longer leave the vault.** `note_id` was joined onto
+  the vault path unchecked in both engines, so `../x`, `/abs/x` or
+  `.tacitus/…` could create, overwrite or delete `.md` files outside the
+  vault or over Tacitus' own state; `forget` took `memory_id` as a file name
+  the same way, and `revert`/`get_version` did the same with `version_id`.
+  Every note path now goes through one validator (`INVALID_NOTE_ID`), memory
+  and version ids must be generated-shape (`[A-Za-z0-9_-]+`), and the sync
+  engine refuses item keys that would escape (`n:../x`, `m:../x`). With
+  collab, a peer holding the vault code could otherwise write outside your
+  vault.
+- **Fix: JS-based MCP clients saw no native tools.** The JS MCP SDK
+  (≥ 1.32) rejects the whole `tools/list` response when a property schema is
+  a bare `true`. That is what the native server emitted for `frontmatter` on
+  `create_note`, `update_note` and `propose_changes`. Those fields now
+  declare an object schema, and a test fails on any boolean property schema.
+- **The npm server has every tool now (16 → 27).** `suggest_links`,
+  `properties_query`, `list_templates`, `create_from_template`, `list_tasks`,
+  `toggle_task`, `rename_note`, `delete_note` and `get_version` are ported
+  from the native engine, with the same arguments, outputs and error codes.
+  A new parity test starts the npm server over a real MCP client and fails if
+  its tool names or descriptions differ from the native table.
+- **Declared types** (both engines): `.tacitus/types/<name>.yaml` declares
+  the properties of notes with `type: <name>` (`string|number|boolean|date|
+  list`, `required`, `enum`). Creates/updates are validated at propose and at
+  commit; `SCHEMA_VIOLATION` lists every problem at once. An update is
+  refused only for problems it introduces, so notes written before their
+  type was declared can still be tagged and linked. Undeclared types,
+  untyped notes and sync merges are not validated. New tool `list_types`.
+- **`capture`** (both engines): append a timestamped bullet or a `- [ ]`
+  task to `daily/YYYY-MM-DD` (created on first capture, from a `daily`
+  template when present). Versioned + audited, one revert per capture.
+- SDK: `listTypes()`, `capture()`; `TOOL_UNAVAILABLE` now only means "your
+  server is older than 0.2.0".
+
 ## npm 0.1.3 — 2026-10-31
 
 - `@dashiro/tacitus-mcp-server`: `@modelcontextprotocol/sdk` 1.29 → 1.32.2

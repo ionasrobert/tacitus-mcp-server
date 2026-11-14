@@ -1,6 +1,8 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { TacitusError } from '../lib/errors';
+import { isPlainId } from '../lib/ids';
 import { MemorySchema, type Memory } from './types';
 
 /**
@@ -51,6 +53,14 @@ export class MemoryStore {
   }
 
   async remove(id: string): Promise<boolean> {
+    if (!isPlainId(id)) {
+      // An id like "../../notes/x" would otherwise delete a file outside the store.
+      throw new TacitusError({
+        code: 'INVALID_INPUT',
+        reason: `Invalid memory_id ${JSON.stringify(id)}.`,
+        suggestion: 'Use a memory_id returned by remember or recall.',
+      });
+    }
     try {
       await rm(join(this.memoryDir, `${id}.md`));
       return true;

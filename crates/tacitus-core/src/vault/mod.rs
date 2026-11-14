@@ -1,3 +1,4 @@
+pub mod daily;
 pub mod embed;
 pub mod embed_cache;
 #[cfg(feature = "ollama")]
@@ -8,6 +9,7 @@ pub mod index;
 pub mod parse;
 pub mod properties;
 pub mod rename;
+pub mod schema;
 pub mod search;
 pub mod suggest;
 pub mod tasks;
@@ -15,6 +17,7 @@ pub mod template;
 pub mod types;
 pub mod write;
 
+pub use daily::{append_line, capture_line, daily_note_id, DAILY_DIR, DAILY_TEMPLATE};
 pub use embed::{cosine, Embedder, HashingEmbedder};
 pub use embed_cache::CachedEmbedder;
 #[cfg(feature = "ollama")]
@@ -25,6 +28,7 @@ pub use index::VaultIndex;
 pub use parse::parse_note;
 pub use properties::{properties_query, PropFilter, PropOp, PropertiesQueryArgs, PropertiesRow};
 pub use rename::rename_note_ops;
+pub use schema::{PropKind, PropSpec, TypeDef, TypeEntry, TypeStore};
 pub use search::{search_notes, SearchArgs, SearchHit, SearchMode};
 pub use suggest::{suggest_links, LinkSuggestion, SuggestArgs};
 pub use tasks::{list_tasks, note_tasks, toggled_content, Task, TaskFilter};

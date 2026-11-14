@@ -32,3 +32,14 @@ export async function makeVault(): Promise<string> {
 
   return dir;
 }
+
+/** A temp vault containing exactly the given `relative/path.md → raw` files. */
+export async function vaultWith(files: Record<string, string>): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'mv-vault-'));
+  for (const [rel, raw] of Object.entries(files)) {
+    const path = join(dir, rel);
+    await mkdir(join(path, '..'), { recursive: true });
+    await writeFile(path, raw, 'utf8');
+  }
+  return dir;
+}

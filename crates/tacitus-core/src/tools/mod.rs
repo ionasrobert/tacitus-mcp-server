@@ -25,11 +25,11 @@ use crate::memory::recall::RecallArgs;
 use crate::memory::types::MemoryType;
 use crate::memory::{MemoryStore, ProvenanceInput, RememberInput};
 use crate::vault::{
-    get_note, graph_query, list_tasks, parse_note, properties_query, rename_note_ops,
-    render_template, search_notes, suggest_links, toggled_content, ChangeOp, Changeset, Embedder,
-    HashingEmbedder, NoteFormat, NoteWriter, PermissionScope, PropFilter, PropOp,
-    PropertiesQueryArgs, Relation, SearchArgs, SearchMode, SuggestArgs, TaskFilter, TemplateStore,
-    VaultIndex,
+    append_line, capture_line, daily_note_id, get_note, graph_query, list_tasks, parse_note,
+    properties_query, rename_note_ops, render_template, search_notes, suggest_links,
+    toggled_content, ChangeOp, Changeset, Embedder, HashingEmbedder, NoteFormat, NoteWriter,
+    PermissionScope, PropFilter, PropOp, PropertiesQueryArgs, Relation, SearchArgs, SearchMode,
+    SuggestArgs, TaskFilter, TemplateStore, TypeEntry, TypeStore, VaultIndex, DAILY_TEMPLATE,
 };
 
 use args::*;
@@ -58,7 +58,7 @@ pub struct ToolDescriptor {
     pub description: &'static str,
 }
 
-/// All 25 tools, in the server's definition order. `capabilities` output is
+/// All 27 tools, in the server's definition order. `capabilities` output is
 /// sorted by name (rmcp's `ToolRouter::list_all` sorts, and the wire must not
 /// change).
 const TOOLS: &[ToolDescriptor] = &[
@@ -181,6 +181,16 @@ const TOOLS: &[ToolDescriptor] = &[
         name: "get_version",
         writes: false,
         description: "Inspect a committed version: which notes it created/updated/deleted (default), plus each note's before/after when include_content=true (truncated to max_tokens each, default 500). Pairs with audit_log and revert.",
+    },
+    ToolDescriptor {
+        name: "list_types",
+        writes: false,
+        description: "List declared note types (.tacitus/types/*.yaml): each property's type (string|number|boolean|date|list), required, enum. Creates/updates of a note whose frontmatter `type` names a declared type are validated; violations return SCHEMA_VIOLATION listing every problem.",
+    },
+    ToolDescriptor {
+        name: "capture",
+        writes: true,
+        description: "Quick capture: append a line to a daily note (daily/YYYY-MM-DD, default today; created on first capture, from the `daily` template if one exists). task=true appends a `- [ ]` checklist item that list_tasks sees; otherwise a timestamped bullet. Versioned + audited. Returns note_id, version_id and the line written.",
     },
     ToolDescriptor {
         name: "capabilities",
@@ -365,6 +375,8 @@ impl ToolRegistry {
             "rename_note" => self.rename_note(parse_args(args)?),
             "delete_note" => self.delete_note(parse_args(args)?),
             "get_version" => self.get_version(parse_args(args)?),
+            "list_types" => self.list_types(),
+            "capture" => self.capture(parse_args(args)?),
             "capabilities" => self.capabilities(allowlist),
             // Unreachable: dispatch() rejects unknown tools before run_tool.
             other => Err(TacitusError::new(
@@ -433,6 +445,13 @@ impl ToolRegistry {
     }
 
     pub fn forget(&self, args: ForgetArgs) -> Result<Value, TacitusError> {
+        if !crate::ids::is_plain_id(&args.memory_id) {
+            return Err(TacitusError::new(
+                "INVALID_INPUT",
+                format!("memory_id {:?} is not a memory id.", args.memory_id),
+                "Use a memory_id returned by remember or recall.",
+            ));
+        }
         let removed = MemoryStore::new(&self.vault)
             .remove(&args.memory_id)
             .map_err(|e| internal(e, "Check the vault path."))?;
@@ -766,6 +785,89 @@ impl ToolRegistry {
             "change_id": detail.change_id,
             "notes": notes,
         }))
+    }
+
+    // ---- types / capture ----
+
+    pub fn list_types(&self) -> Result<Value, TacitusError> {
+        let entries = TypeStore::new(&self.vault)
+            .list()
+            .map_err(|e| internal(e, "Check the vault path."))?;
+        let types: Vec<Value> = entries
+            .iter()
+            .map(|entry| match entry {
+                TypeEntry::Ok(def) => def.to_json(),
+                TypeEntry::Broken { name, error } => json!({ "name": name, "error": error }),
+            })
+            .collect();
+        Ok(json!({ "types": types }))
+    }
+
+    pub fn capture(&self, args: CaptureArgs) -> Result<Value, TacitusError> {
+        let now = chrono::Local::now();
+        let date = args
+            .date
+            .unwrap_or_else(|| now.format("%Y-%m-%d").to_string());
+        let note_id = daily_note_id(&date)?;
+        let line = capture_line(
+            &args.text,
+            args.task.unwrap_or(false),
+            &now.format("%H:%M").to_string(),
+        )?;
+
+        // Hold the writer across read → write so two captures can't both
+        // append to the same stale content.
+        let mut writer = self.writer.lock().expect("writer mutex poisoned");
+        let path = self.vault.join(format!("{note_id}.md"));
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(raw) => Some(parse_note(&raw, &format!("{note_id}.md"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let (result, created) = match existing {
+            Some(note) => (
+                writer.update_note(&note_id, Some(append_line(&note.content, &line)), None)?,
+                false,
+            ),
+            None => {
+                let (content, frontmatter) = self.new_daily(&note_id, &date)?;
+                (
+                    writer.create_note(&note_id, &append_line(&content, &line), frontmatter)?,
+                    true,
+                )
+            }
+        };
+        Ok(json!({
+            "note_id": note_id,
+            "version_id": result.version_id,
+            "line": line,
+            "created": created,
+        }))
+    }
+
+    /// Body + frontmatter of a fresh daily note: the `daily` template when it
+    /// needs no vars beyond `{{date}}` (filled with the capture's date, not
+    /// today), else `# <date>` with `type: daily` and `date`.
+    fn new_daily(
+        &self,
+        note_id: &str,
+        date: &str,
+    ) -> Result<(String, Option<serde_yaml::Value>), TacitusError> {
+        if let Ok(raw) = TemplateStore::new(&self.vault).load_raw(DAILY_TEMPLATE) {
+            let vars = std::collections::HashMap::from([("date".to_string(), date.to_string())]);
+            if let Ok(rendered) = render_template(&raw, &vars) {
+                let note = parse_note(&rendered, &format!("{note_id}.md"));
+                let frontmatter = match &note.frontmatter {
+                    serde_yaml::Value::Mapping(m) if m.is_empty() => None,
+                    fm => Some(fm.clone()),
+                };
+                return Ok((note.content, frontmatter));
+            }
+        }
+        let mut fm = serde_yaml::Mapping::new();
+        fm.insert("type".into(), "daily".into());
+        fm.insert("date".into(), date.into());
+        Ok((format!("# {date}\n"), Some(serde_yaml::Value::Mapping(fm))))
     }
 
     // ---- meta ----

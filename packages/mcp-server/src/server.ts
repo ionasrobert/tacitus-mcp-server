@@ -9,6 +9,8 @@ import { runTool, type PermissionScope, type Tool } from './tools/types';
 import { vaultTools } from './tools/vault';
 import { writeTools } from './tools/write';
 import { convenienceTools } from './tools/convenience';
+import { structuredReadTools, structuredWriteTools } from './tools/structured';
+import { typeAndCaptureTools } from './tools/capture';
 import { HashingEmbedder, type Embedder } from './vault/embed';
 import { CachedEmbedder } from './vault/embed-cache';
 import { TransformersEmbedder } from './vault/transformers';
@@ -69,6 +71,9 @@ export async function buildServer(
     ...vaultTools(index, embedder),
     ...writeTools(writer),
     ...convenienceTools(writer),
+    ...structuredReadTools(index, vaultDir, embedder),
+    ...structuredWriteTools(index, vaultDir, writer),
+    ...typeAndCaptureTools(vaultDir, writer),
   ];
   tools.push(capabilitiesTool(() => tools, scope));
 

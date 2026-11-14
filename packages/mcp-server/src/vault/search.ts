@@ -29,7 +29,7 @@ const SNIPPET_MAX = 240;
 const SEMANTIC_MIN_SIM = 0.15;
 const defaultEmbedder = new HashingEmbedder();
 
-function makeSnippet(query: string, content: string): string {
+export function makeSnippet(query: string, content: string): string {
   const terms = new Set(tokenize(query));
   const collapsed = content.replace(/\s+/g, ' ').trim();
   const lower = collapsed.toLowerCase();

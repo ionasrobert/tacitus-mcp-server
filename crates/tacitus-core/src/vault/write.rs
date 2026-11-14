@@ -20,10 +20,11 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 use crate::error::TacitusError;
-use crate::ids::stable_id;
+use crate::ids::{is_plain_id, stable_id, validate_note_id};
 
 use super::index::VaultIndex;
 use super::parse::parse_note;
+use super::schema::TypeStore;
 
 /// Permission scope for a session. Default is minimum-privilege friendly: a
 /// read-only scope can dry-run (`propose`) but never mutate.
@@ -272,8 +273,19 @@ impl NoteWriter {
         self.origin = None;
     }
 
-    fn note_path(&self, note_id: &str) -> PathBuf {
-        self.vault_dir.join(format!("{note_id}.md"))
+    /// The note's file — only for ids that stay inside the vault and outside
+    /// `.tacitus/` (every disk access goes through here, SetRaw from sync too).
+    fn note_path(&self, note_id: &str) -> Result<PathBuf, TacitusError> {
+        validate_note_id(note_id)?;
+        Ok(self.vault_dir.join(format!("{note_id}.md")))
+    }
+
+    /// The snapshot file of a version — only for generated-shape ids.
+    fn version_path(&self, version_id: &str) -> Result<PathBuf, TacitusError> {
+        if !is_plain_id(version_id) {
+            return Err(unknown_version(version_id));
+        }
+        Ok(self.history_dir.join(format!("{version_id}.json")))
     }
 
     // ---- Convenience helpers (auto-commit; still transactional + audited) ----
@@ -360,7 +372,7 @@ impl NoteWriter {
     }
 
     fn current_note(&self, note_id: &str) -> Result<Option<super::types::Note>, TacitusError> {
-        match read_raw_or_null(&self.note_path(note_id))? {
+        match read_raw_or_null(&self.note_path(note_id)?)? {
             Some(raw) => Ok(Some(parse_note(&raw, &format!("{note_id}.md")))),
             None => Ok(None),
         }
@@ -403,7 +415,7 @@ impl NoteWriter {
                     let _ =
                         self.apply_state(note_id, before.get(note_id).and_then(|o| o.as_deref()));
                 }
-                return Err(err.into());
+                return Err(err);
             }
             done.push(entry.note_id.clone());
         }
@@ -435,14 +447,8 @@ impl NoteWriter {
 
     pub fn revert(&self, version_id: &str) -> Result<RevertResult, TacitusError> {
         self.assert_writable()?;
-        let raw = read_raw_or_null(&self.history_dir.join(format!("{version_id}.json")))?
-            .ok_or_else(|| {
-                TacitusError::new(
-                    "UNKNOWN_VERSION",
-                    format!("No version with id \"{version_id}\"."),
-                    "Use a version_id returned by commit_changes.",
-                )
-            })?;
+        let raw = read_raw_or_null(&self.version_path(version_id)?)?
+            .ok_or_else(|| unknown_version(version_id))?;
         let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|e| {
             TacitusError::new(
                 "INTERNAL",
@@ -487,14 +493,8 @@ impl NoteWriter {
     /// Expand a committed version's snapshot: per-note before/after (Part I.7
     /// observability — see WHAT an agent changed, not just that it did).
     pub fn get_version(&self, version_id: &str) -> Result<VersionDetail, TacitusError> {
-        let raw = read_raw_or_null(&self.history_dir.join(format!("{version_id}.json")))?
-            .ok_or_else(|| {
-                TacitusError::new(
-                    "UNKNOWN_VERSION",
-                    format!("No version with id \"{version_id}\"."),
-                    "Use a version_id from audit_log.",
-                )
-            })?;
+        let raw = read_raw_or_null(&self.version_path(version_id)?)?
+            .ok_or_else(|| unknown_version(version_id))?;
         let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|e| {
             TacitusError::new(
                 "INTERNAL",
@@ -550,9 +550,10 @@ impl NoteWriter {
     }
 
     fn build_diff(&self, changeset: &Changeset) -> Result<Vec<DiffEntry>, TacitusError> {
+        let types = TypeStore::new(&self.vault_dir);
         let mut diff = Vec::with_capacity(changeset.ops.len());
         for op in &changeset.ops {
-            let before = read_raw_or_null(&self.note_path(op.note_id()))?;
+            let before = read_raw_or_null(&self.note_path(op.note_id())?)?;
             match op {
                 ChangeOp::Create {
                     note_id,
@@ -565,6 +566,9 @@ impl NoteWriter {
                             format!("Note \"{note_id}\" already exists."),
                             "Use an update op, or choose a different note_id.",
                         ));
+                    }
+                    if let Some(fm) = frontmatter {
+                        types.check(note_id, fm, None)?;
                     }
                     diff.push(DiffEntry {
                         note_id: note_id.clone(),
@@ -582,6 +586,11 @@ impl NoteWriter {
                         return Err(not_found(note_id));
                     };
                     let existing = parse_note(&before_raw, &format!("{note_id}.md"));
+                    types.check(
+                        note_id,
+                        frontmatter.as_ref().unwrap_or(&existing.frontmatter),
+                        Some(&existing.frontmatter),
+                    )?;
                     let fm = frontmatter.clone().unwrap_or(existing.frontmatter);
                     let body = content.clone().unwrap_or(existing.content);
                     diff.push(DiffEntry {
@@ -621,13 +630,13 @@ impl NoteWriter {
     }
 
     /// Bring a note file to the given state (`None` = deleted) with an atomic write.
-    fn apply_state(&self, note_id: &str, raw: Option<&str>) -> std::io::Result<()> {
-        let path = self.note_path(note_id);
+    fn apply_state(&self, note_id: &str, raw: Option<&str>) -> Result<(), TacitusError> {
+        let path = self.note_path(note_id)?;
         match raw {
             None => match fs::remove_file(&path) {
                 Ok(()) => Ok(()),
                 Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(err),
+                Err(err) => Err(err.into()),
             },
             Some(content) => {
                 if let Some(parent) = path.parent() {
@@ -669,6 +678,14 @@ impl NoteWriter {
         fs::rename(&tmp, &path)?;
         Ok(())
     }
+}
+
+fn unknown_version(version_id: &str) -> TacitusError {
+    TacitusError::new(
+        "UNKNOWN_VERSION",
+        format!("No version with id \"{version_id}\"."),
+        "Use a version_id from commit_changes or audit_log.",
+    )
 }
 
 fn not_found(note_id: &str) -> TacitusError {
@@ -1062,5 +1079,35 @@ mod tests {
         writer.clear_origin();
         assert_eq!(writer.origin(), None);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn note_ids_that_escape_the_vault_never_touch_disk() {
+        let root = temp_vault("escape-root");
+        let dir = root.join("vault");
+        fs::create_dir_all(&dir).unwrap();
+        let mut writer = NoteWriter::new(&dir, PermissionScope::ReadWrite);
+        for bad in ["../escaped", ".tacitus/audit", "a//b"] {
+            let err = writer.create_note(bad, "x", None).unwrap_err();
+            assert_eq!(err.code, "INVALID_NOTE_ID", "{bad:?}");
+        }
+        // SetRaw (the sync op) is held to the same rule.
+        let err = writer
+            .propose(Changeset {
+                ops: vec![ChangeOp::SetRaw {
+                    note_id: "../escaped".into(),
+                    raw: Some("x".into()),
+                }],
+            })
+            .unwrap_err();
+        assert_eq!(err.code, "INVALID_NOTE_ID");
+        assert!(!root.join("escaped.md").exists());
+        assert!(!dir.join(".tacitus").join("audit.log").exists());
+        // Version ids are file names too.
+        assert_eq!(writer.revert("../x").unwrap_err().code, "UNKNOWN_VERSION");
+        assert_eq!(
+            writer.get_version("a/b").unwrap_err().code,
+            "UNKNOWN_VERSION"
+        );
     }
 }

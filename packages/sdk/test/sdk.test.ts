@@ -36,7 +36,7 @@ afterAll(async () => {
 describe('TacitusClient over stdio', () => {
   it('capabilities lists the npm server surface', async () => {
     const caps = await tacitus.capabilities();
-    expect(caps.tools.length).toBe(16);
+    expect(caps.tools.length).toBe(27);
     expect(caps.permissions.scope).toBe('read-write');
     expect(caps.tools.map((t) => t.name)).toContain('search');
   });
@@ -113,12 +113,24 @@ describe('TacitusClient over stdio', () => {
     expect(timestamps).toEqual(sorted);
   });
 
-  it('native-first tools against the npm server throw TOOL_UNAVAILABLE', async () => {
-    const promise = tacitus.listTasks();
+  it('capture → listTasks: the formerly native-only surface works over npm', async () => {
+    const day = await tacitus.capture({
+      text: 'ship the SDK due:2026-12-01',
+      task: true,
+      date: '2026-11-14',
+    });
+    expect(day).toMatchObject({ note_id: 'daily/2026-11-14', created: true });
+    const tasks = await tacitus.listTasks({ note_id: 'daily/2026-11-14' });
+    expect(tasks.map((t) => t.due)).toEqual(['2026-12-01']);
+    expect(await tacitus.listTypes()).toEqual([]);
+  });
+
+  it('a tool the server lacks throws TOOL_UNAVAILABLE', async () => {
+    const promise = tacitus.call('no_such_tool');
     await expect(promise).rejects.toBeInstanceOf(TacitusToolError);
     await expect(promise).rejects.toMatchObject({
       code: 'TOOL_UNAVAILABLE',
-      suggestion: expect.stringContaining('tacitus-mcp binary'),
+      suggestion: expect.stringContaining('tacitus-mcp-server >= 0.2.0'),
     });
   });
 });

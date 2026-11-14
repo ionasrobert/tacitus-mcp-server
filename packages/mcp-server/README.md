@@ -4,10 +4,9 @@
 
 Site: **[tacitus.md](https://tacitus.md)** · MIT · no telemetry, no account.
 
-> **This is the core server (16 tools).** The flagship **native binary**
-> (25 tools — adds `properties_query`, templates, tasks, `rename_note`,
-> `get_version`, plus [end-to-end encrypted multi-device sync](#multi-device-sync-native-binary-beta)
-> — with zero runtime deps) ships for macOS/Linux/Windows via
+> **All 27 tools, same contract as the native binary.** The **native binary**
+> adds [end-to-end encrypted multi-device sync](#multi-device-sync-native-binary-beta)
+> and needs zero runtime deps; ships for macOS/Linux/Windows via
 > [GitHub Releases](https://github.com/ionasrobert/tacitus-mcp-server/releases/latest):
 >
 > ```bash
@@ -78,10 +77,20 @@ model isn't available, it falls back to the deterministic embedder automatically
 | Group | Tools |
 |---|---|
 | **Memory** | `remember`, `recall`, `forget` |
-| **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes` |
-| **Write-back** | `propose_changes`, `commit_changes`, `revert` |
+| **Retrieval** | `search`, `get_note`, `graph_query`, `suggest_links`, `list_notes`, `properties_query` |
+| **Write-back** | `propose_changes`, `commit_changes`, `revert`, `rename_note`, `delete_note`, `get_version` |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
+| **Types** | `list_types` |
+| **Capture** | `capture` |
+| **Templates** | `list_templates`, `create_from_template` |
+| **Tasks** | `list_tasks`, `toggle_task` |
 | **Meta** | `capabilities` |
+
+Declared types: put `.tacitus/types/article.yaml` (`properties: { status:
+{ type: string, required: true, enum: [idea, draft] } }`) in the vault and any
+write to a note with `type: article` is validated — a bad write gets a
+`SCHEMA_VIOLATION` listing every problem. `capture` appends a timestamped
+bullet or a `- [ ]` task to `daily/YYYY-MM-DD`.
 
 Every tool validates input with a schema and returns structured, actionable
 errors (`{ code, reason, suggestion }`) rather than stack traces.

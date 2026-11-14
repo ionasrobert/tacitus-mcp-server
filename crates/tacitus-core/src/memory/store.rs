@@ -94,6 +94,11 @@ impl MemoryStore {
     }
 
     pub fn remove(&self, id: &str) -> std::io::Result<bool> {
+        // A memory id is a file name: anything but a generated-shape id
+        // (`mem_…`) could name a file outside the memory dir.
+        if !crate::ids::is_plain_id(id) {
+            return Ok(false);
+        }
         match fs::remove_file(self.memory_dir.join(format!("{id}.md"))) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),

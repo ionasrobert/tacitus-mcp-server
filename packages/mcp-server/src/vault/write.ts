@@ -2,10 +2,11 @@ import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/prom
 import { dirname, join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 import { TacitusError } from '../lib/errors';
-import { stableId } from '../lib/ids';
+import { assertNoteId, isPlainId, stableId } from '../lib/ids';
 import type { PermissionScope } from '../tools/types';
 import type { VaultIndex } from './index';
 import { parseNote } from './parse';
+import { TypeStore } from './schema';
 import type { Note } from './types';
 
 export interface CreateOp {
@@ -50,6 +51,21 @@ interface Snapshot {
   before: Record<string, string | null>;
   /** note_id → new raw file contents, or null if the note was deleted. */
   after: Record<string, string | null>;
+}
+
+/** One note's change inside a committed version (from the history snapshot). */
+export interface VersionNoteChange {
+  note_id: string;
+  op: 'created' | 'updated' | 'deleted';
+  before: string | null;
+  after: string | null;
+}
+
+/** A committed version, fully expanded — what changed, note by note. */
+export interface VersionDetail {
+  version_id: string;
+  change_id: string;
+  notes: VersionNoteChange[];
 }
 
 export interface AuditEntry {
@@ -99,6 +115,7 @@ export class NoteWriter {
   }
 
   private notePath(noteId: string): string {
+    assertNoteId(noteId); // the single choke point for every fs access by note id
     return join(this.vaultDir, `${noteId}.md`);
   }
 
@@ -119,6 +136,11 @@ export class NoteWriter {
     return this.apply({
       ops: [{ op: 'update', note_id: noteId, content: patch.content, frontmatter: patch.frontmatter }],
     });
+  }
+
+  /** Delete a note (auto-committed) — versioned and revertible. */
+  async deleteNote(noteId: string): Promise<CommitResult> {
+    return this.apply({ ops: [{ op: 'delete', note_id: noteId }] });
   }
 
   /** Append a `[[to]]` wikilink to the source note (idempotent). */
@@ -145,9 +167,15 @@ export class NoteWriter {
     });
   }
 
-  private async apply(changeset: Changeset): Promise<CommitResult> {
+  /** Propose + commit in one step: the whole changeset is ONE version. */
+  async apply(changeset: Changeset): Promise<CommitResult> {
     const { change_id } = await this.propose(changeset);
     return this.commit(change_id);
+  }
+
+  /** The note as it is on disk now (not the possibly-stale index), or null. */
+  async readNote(noteId: string): Promise<Note | null> {
+    return this.currentNote(noteId);
   }
 
   private async currentNote(noteId: string): Promise<Note | null> {
@@ -213,15 +241,10 @@ export class NoteWriter {
 
   async revert(version_id: string): Promise<{ reverted: true; version_id: string }> {
     this.assertWritable();
-    const raw = await readRawOrNull(join(this.historyDir, `${version_id}.json`));
-    if (raw === null) {
-      throw new TacitusError({
-        code: 'UNKNOWN_VERSION',
-        reason: `No version with id "${version_id}".`,
-        suggestion: 'Use a version_id returned by commit_changes.',
-      });
-    }
-    const snapshot = JSON.parse(raw) as Snapshot;
+    const snapshot = await this.readSnapshot(
+      version_id,
+      'Use a version_id returned by commit_changes.',
+    );
     for (const [noteId, priorRaw] of Object.entries(snapshot.before)) {
       await this.applyState(noteId, priorRaw);
     }
@@ -234,6 +257,41 @@ export class NoteWriter {
       scope: this.scope,
     });
     return { reverted: true, version_id };
+  }
+
+  /**
+   * Expand a committed version's snapshot: per-note before/after, so an agent
+   * sees WHAT changed, not just that something did. Notes sorted by id.
+   */
+  async getVersion(version_id: string): Promise<VersionDetail> {
+    const snapshot = await this.readSnapshot(version_id, 'Use a version_id from audit_log.');
+    const notes = Object.keys(snapshot.before)
+      .sort()
+      .map((note_id): VersionNoteChange => {
+        const before = snapshot.before[note_id] ?? null;
+        const after = snapshot.after[note_id] ?? null;
+        const op =
+          before === null && after !== null
+            ? 'created'
+            : before !== null && after === null
+              ? 'deleted'
+              : 'updated';
+        return { note_id, op, before, after };
+      });
+    return { version_id: snapshot.version_id, change_id: snapshot.change_id, notes };
+  }
+
+  private async readSnapshot(version_id: string, suggestion: string): Promise<Snapshot> {
+    const unknown = new TacitusError({
+      code: 'UNKNOWN_VERSION',
+      reason: `No version with id "${version_id}".`,
+      suggestion,
+    });
+    // A version id is a generated token; anything else could escape history/.
+    if (!isPlainId(version_id)) throw unknown;
+    const raw = await readRawOrNull(join(this.historyDir, `${version_id}.json`));
+    if (raw === null) throw unknown;
+    return JSON.parse(raw) as Snapshot;
   }
 
   /** Read the agent-action audit log, most recent first. */
@@ -263,6 +321,7 @@ export class NoteWriter {
   }
 
   private async buildDiff(changeset: Changeset): Promise<DiffEntry[]> {
+    const types = new TypeStore(this.vaultDir);
     const diff: DiffEntry[] = [];
     for (const op of changeset.ops) {
       const path = this.notePath(op.note_id);
@@ -276,6 +335,7 @@ export class NoteWriter {
             suggestion: 'Use an update op, or choose a different note_id.',
           });
         }
+        if (op.frontmatter) await types.check(op.note_id, op.frontmatter);
         diff.push({
           note_id: op.note_id,
           op: 'create',
@@ -285,10 +345,9 @@ export class NoteWriter {
       } else if (op.op === 'update') {
         if (before === null) throw this.notFound(op.note_id);
         const existing = parseNote(before, `${op.note_id}.md`);
-        const after = serialize(
-          op.frontmatter ?? existing.frontmatter,
-          op.content ?? existing.content,
-        );
+        const frontmatter = op.frontmatter ?? existing.frontmatter;
+        await types.check(op.note_id, frontmatter, existing.frontmatter);
+        const after = serialize(frontmatter, op.content ?? existing.content);
         diff.push({ note_id: op.note_id, op: 'update', before, after });
       } else {
         if (before === null) throw this.notFound(op.note_id);

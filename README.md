@@ -77,9 +77,9 @@ Then point any MCP client at the binary instead of `npx`:
 claude mcp add tacitus -- tacitus-mcp /path/to/your/vault
 ```
 
-The native binary is the flagship server (25 tools; the npm server has the
-core 16 — see the table below). Both share the same on-disk formats, so a
-vault works with either. Set `TACITUS_SCOPE=read-only` to run the native
+The native binary and the npm server serve the same 27 tools (the native
+binary adds encrypted multi-device sync and the plugin host). Both share the
+same on-disk formats, so a vault works with either. Set `TACITUS_SCOPE=read-only` to run the native
 server without write permissions.
 
 ## Tools
@@ -87,14 +87,22 @@ server without write permissions.
 | Group | Tools |
 |---|---|
 | **Memory** | `remember`, `recall`, `forget` |
-| **Retrieval** | `search`, `get_note`, `graph_query`, `list_notes`, `properties_query`* |
-| **Write-back** | `propose_changes`, `commit_changes`, `revert`, `rename_note`*, `delete_note`*, `get_version`* |
+| **Retrieval** | `search`, `get_note`, `graph_query`, `suggest_links`, `list_notes`, `properties_query` |
+| **Write-back** | `propose_changes`, `commit_changes`, `revert`, `rename_note`, `delete_note`, `get_version` |
 | **Convenience** | `create_note`, `update_note`, `link`, `tag`, `audit_log` |
-| **Templates** | `list_templates`*, `create_from_template`* |
-| **Tasks** | `list_tasks`*, `toggle_task`* |
+| **Types** | `list_types` |
+| **Capture** | `capture` |
+| **Templates** | `list_templates`, `create_from_template` |
+| **Tasks** | `list_tasks`, `toggle_task` |
 | **Meta** | `capabilities` |
 
-\* Native-Rust-server first (the npm server will catch up):
+**Declared types** — `.tacitus/types/<name>.yaml` declares the properties a
+note with `type: <name>` must carry (`string|number|boolean|date|list`,
+`required`, `enum`); any write that breaks the contract is refused with a
+`SCHEMA_VIOLATION` listing every problem, so typed notes stay queryable.
+**`capture`** — append a thought (timestamped bullet) or a task (`- [ ]`) to
+`daily/YYYY-MM-DD` without deciding where it belongs; the day's note is
+created on first capture, from a `daily` template if you have one.
 `properties_query` — Bases-like structured queries over YAML frontmatter
 (filters `eq|ne|contains|exists|not_exists|gt|lt|gte|lte`, sort, select,
 token_budget). Templates — Markdown files in `.tacitus/templates/` whose
@@ -131,7 +139,7 @@ public API, with permission scoping, versioning, and audit built in.
   The native binary embeds the runtime: `tacitus-mcp plugin list|run` for cron
   agents and scripts.
   See [docs/PLUGINS.md §5](./docs/PLUGINS.md#5-sandboxed-wasm-plugins-experimental)
-- [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 25 tools
+- [docs/MCP_API.md](./docs/MCP_API.md) — full reference for all 27 tools
   (params, returns, error codes)
 - Neural search (opt-in): `TACITUS_EMBEDDER=ollama` uses a local Ollama daemon
   for embeddings (`TACITUS_OLLAMA_EMBED_MODEL`, default `nomic-embed-text`;
@@ -191,8 +199,8 @@ your-vault/
 Polyglot monorepo. The reference server (shipped on npm) is TypeScript in
 `packages/mcp-server`. A **native Rust server** in `crates/` provides a
 single-binary, zero-runtime-deps build (`crates/tacitus-core` engine +
-`crates/tacitus-mcp` rmcp server) — a superset of the TS server (25 vs 16
-tools). Its `stable_id` matches the TS engine byte-for-byte, so memory ids are
+`crates/tacitus-mcp` rmcp server) — the same 27 tools as the TS server (a parity test keeps names and
+descriptions byte-identical), plus sync and the plugin host. Its `stable_id` matches the TS engine byte-for-byte, so memory ids are
 identical across both engines.
 
 ```bash

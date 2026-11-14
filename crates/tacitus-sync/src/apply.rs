@@ -53,19 +53,26 @@ fn core_err(e: tacitus_core::error::TacitusError) -> SyncError {
 }
 
 impl SyncEngine {
+    /// Where an item lives on disk — None for keys whose id would escape the
+    /// vault (a peer holding the vault code must not be able to write
+    /// `n:../../x` or `m:../x` outside it), so such items are never applied.
     fn item_path(&self, key: &str) -> Option<(PathBuf, bool)> {
         if let Some(id) = key.strip_prefix("n:") {
-            Some((self.vault_dir.join(format!("{id}.md")), true))
+            tacitus_core::ids::note_id_problem(id)
+                .is_none()
+                .then(|| (self.vault_dir.join(format!("{id}.md")), true))
         } else {
-            key.strip_prefix("m:").map(|id| {
-                (
-                    self.vault_dir
-                        .join(".tacitus")
-                        .join("memory")
-                        .join(format!("{id}.md")),
-                    false,
-                )
-            })
+            key.strip_prefix("m:")
+                .filter(|id| tacitus_core::ids::is_plain_id(id))
+                .map(|id| {
+                    (
+                        self.vault_dir
+                            .join(".tacitus")
+                            .join("memory")
+                            .join(format!("{id}.md")),
+                        false,
+                    )
+                })
         }
     }
 
@@ -500,5 +507,25 @@ mod tests {
         );
         fs::remove_dir_all(&da).ok();
         fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn item_keys_that_escape_the_vault_have_no_path() {
+        let d = temp_vault("escape");
+        let engine = SyncEngine::open(&d, &VaultCode::generate()).unwrap();
+        for bad in [
+            "n:../evil",
+            "n:/etc/evil",
+            "n:.tacitus/audit",
+            "m:../evil",
+            "m:a/b",
+        ] {
+            assert!(
+                engine.item_path(bad).is_none(),
+                "{bad:?} must not map to a path"
+            );
+        }
+        assert!(engine.item_path("n:notes/ok").is_some());
+        assert!(engine.item_path("m:mem_0123abcd").is_some());
     }
 }

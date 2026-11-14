@@ -303,7 +303,7 @@ qwzR2eKm0XsJcU6fHdPl8oGyAn3iM1NtE5aB9v…"}</pre>
            alt="An agent remembers a fact with its source, recalls it under a token budget, proposes a diff, commits it, and reverts it — the real tool calls and their real ids.">
       <p class="term-note">Not a mock-up: that recording is the binary being driven over stdio, so the
         memory ids, the changeset id and the audit line are the ones it actually produced.
-        25 tools in the native binary, 16 in the npm server, all schema-validated with structured errors.</p>
+        27 tools in both the native binary and the npm server, all schema-validated with structured errors.</p>
     </div>
   </section>
 
@@ -393,7 +393,7 @@ vault_id   = HKDF(root, <span class="dim">"tacitus/v1/vault-id"</span>)    <span
   @dashiro/tacitus-mcp-server /path/to/vault</pre>
         </div>
         <div class="start">
-          <h3>Native binary — no Node, 25 tools</h3>
+          <h3>Native binary — no Node, 27 tools + sync</h3>
           <pre><span class="dim"># macOS / Linux</span>
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/ionasrobert/tacitus-mcp-server/releases/latest/download/tacitus-mcp-installer.sh | sh</pre>

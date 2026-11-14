@@ -1,7 +1,7 @@
 /**
  * Typed mirrors of the Tacitus MCP tool contract (docs/MCP_API.md). The
- * native binary serves all 25 tools; the npm server (`@dashiro/tacitus-mcp-server`)
- * serves the core 16 — calling a native-first tool against it throws
+ * native binary and the npm server (`@dashiro/tacitus-mcp-server` ≥ 0.2.0)
+ * both serve all 27 tools; calling a tool an older server lacks throws
  * `TacitusToolError` with code `TOOL_UNAVAILABLE`.
  */
 
@@ -160,7 +160,7 @@ export interface AuditEntry {
   origin?: string;
 }
 
-// ---- properties / templates / tasks (native-first) ----
+// ---- properties / templates / tasks ----
 
 export type PropOp =
   | 'eq'
@@ -252,6 +252,39 @@ export interface VersionDetail {
   version_id: string;
   change_id: string;
   notes: VersionNoteChange[];
+}
+
+// ---- declared types / capture ----
+
+export type PropKind = 'string' | 'number' | 'boolean' | 'date' | 'list';
+
+export interface TypeProperty {
+  type: PropKind;
+  required: boolean;
+  enum?: unknown[];
+}
+
+/** A declared type (`.tacitus/types/<name>.yaml`), or a broken file's error. */
+export type TypeDefinition =
+  | { name: string; description: string | null; properties: Record<string, TypeProperty> }
+  | { name: string; error: string };
+
+export interface CaptureArgs {
+  /** The thought, link or task to capture (folded onto one line). */
+  text: string;
+  /** true = a `- [ ]` task that listTasks sees; default a timestamped bullet. */
+  task?: boolean;
+  /** YYYY-MM-DD; default today (the server's local time). */
+  date?: string;
+}
+
+export interface CaptureResult {
+  note_id: string;
+  version_id: string;
+  /** The exact line appended. */
+  line: string;
+  /** Whether this capture created the day's note. */
+  created: boolean;
 }
 
 // ---- meta ----

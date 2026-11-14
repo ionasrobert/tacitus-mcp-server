@@ -2,8 +2,10 @@
 
 The MCP tool contract **is** Tacitus's public API — the same surface agents,
 plugins, scripts, and the desktop app build on. This page documents every tool
-of the native server (v0.15.0, 25 tools). The npm server exposes the core 16
-(all except those marked **native-first**). The identical contract — same
+(27 tools). The native binary (≥ 0.27.0) and the npm server (≥ 0.2.0) serve
+the identical set — a parity test keeps names and descriptions byte-identical;
+npm 0.1.x served only 16 (no properties, templates, tasks, rename/delete,
+versions, link suggestions, types or capture). The identical contract — same
 registry, same envelopes — is also served inside the WASM plugin sandbox via
 `tacitus.call` (see [PLUGINS.md §5](./PLUGINS.md#5-sandboxed-wasm-plugins-experimental)).
 
@@ -14,7 +16,7 @@ The server speaks [MCP](https://modelcontextprotocol.io) over **stdio**
 
 ```bash
 tacitus-mcp /path/to/vault              # native binary
-npx -y @dashiro/tacitus-mcp-server /path/to/vault   # npm (16 tools)
+npx -y @dashiro/tacitus-mcp-server /path/to/vault   # npm (same 27 tools)
 ```
 
 Every tool returns one text content block containing JSON with a uniform
@@ -134,7 +136,7 @@ Traverse the wikilink graph instead of grepping.
 → `{ "from", "relation", "nodes": [{ "note_id", "title" }] }`
 Errors: `NOTE_NOT_FOUND`, `INVALID_INPUT`.
 
-### `suggest_links` *(native-first)*
+### `suggest_links`
 
 Auto-linking without an LLM: ranked `[[wikilink]]` candidates the note doesn't
 link to yet, scored by title mentions in the note, semantic similarity, shared
@@ -156,7 +158,7 @@ Errors: `NOTE_NOT_FOUND`.
 
 No params → `{ "notes": [{ "note_id", "title", "path" }] }`
 
-### `properties_query` *(native-first)*
+### `properties_query`
 
 Bases-like structured queries over typed YAML frontmatter — "all notes where
 status=active and due < 2026-08-01" is a query, not a search.
@@ -204,7 +206,7 @@ propose and commit within the same session.
 Restores every note the version touched to its prior state.
 Errors: `UNKNOWN_VERSION`, `PERMISSION_DENIED`.
 
-### `rename_note` *(native-first)*
+### `rename_note`
 
 Rename **and retarget every wikilink** that resolves to the note (full-id,
 basename, case-insensitive; `|alias` and `#heading`/`#^block` parts kept) —
@@ -213,11 +215,11 @@ one atomic changeset; a single `revert` undoes the whole rename.
 `{ from, to }` → `{ "version_id", "from", "to", "links_updated_in": n }`
 Errors: `NOTE_NOT_FOUND`, `CONFLICT` (target exists), `INVALID_INPUT`.
 
-### `delete_note` *(native-first)*
+### `delete_note`
 
 `{ note_id }` → `{ "version_id" }` — versioned; `revert` restores it.
 
-### `get_version` *(native-first)*
+### `get_version`
 
 Inspect what a committed version changed — pairs with `audit_log` and
 `revert` to close the observability loop.
@@ -245,7 +247,7 @@ Errors: `UNKNOWN_VERSION`.
 
 ---
 
-## Templates *(native-first)*
+## Templates
 
 Templates are Markdown files in `.tacitus/templates/*.md`; their `{{var}}`
 placeholders **are** the schema. Substitution happens on the raw text before
@@ -265,7 +267,7 @@ fixable in one retry), `CONFLICT`, `INVALID_INPUT` (non-scalar var).
 
 ---
 
-## Tasks *(native-first)*
+## Tasks
 
 Every checklist line (`- [ ] text`, `* [x] text`, indented allowed) anywhere
 in the vault is a typed entity. Metadata parsed from the text: due date
@@ -294,6 +296,56 @@ is an optimistic-concurrency guard: if the line moved or changed you get
 
 ---
 
+## Declared types
+
+A file `.tacitus/types/<name>.yaml` declares what a note with frontmatter
+`type: <name>` carries:
+
+```yaml
+description: An article idea
+properties:
+  status: { type: string, required: true, enum: [idea, draft, published] }
+  priority: { type: number }
+  due: { type: date }        # YYYY-MM-DD, optionally with a time
+  topics: { type: list }
+```
+
+Every create/update (including `propose_changes`, so a dry-run already
+fails) whose **resulting** frontmatter names a declared type is validated:
+required properties present (null counts as absent), each value of its
+declared type, enum respected. On an update only problems the write
+**introduces** are refused — a note that predates its type declaration can
+still be tagged or linked, it just can't get worse. Extra properties are allowed; undeclared types
+and untyped notes are not validated; sync merges are never validated.
+A violation is `SCHEMA_VIOLATION` with **every** problem in `reason`; a
+malformed type file is `INVALID_TYPE_DEF` (never a silent "no validation").
+Pair with `properties_query` (`{ key: "type", op: "eq", value: "article" }`).
+
+### `list_types`
+
+No params → `{ "types": [{ "name", "description", "properties": { "<key>": { "type", "required", "enum"? } } }] }`
+— a broken file appears as `{ "name", "error" }`. Sorted by name; `.yaml`
+wins over `.yml`.
+
+---
+
+## Capture
+
+### `capture`
+
+`{ text, task?: bool, date?: "YYYY-MM-DD" }` → `{ "note_id": "daily/<date>", "version_id", "line", "created" }`
+
+Appends one line to the day's note (default: today, server local time):
+`- HH:MM text`, or `- [ ] text` with `task: true` (so `list_tasks` sees it,
+`due:` included). Multi-line text is folded onto one line. The note is created
+on first capture — from the `daily` template when it needs no vars beyond
+`{{date}}` (filled with the capture's date), else `# <date>` with
+`type: daily` and `date` in the frontmatter. Versioned + audited; one
+`revert` undoes one capture. Errors: `INVALID_INPUT` (empty text, bad date),
+`PERMISSION_DENIED`, `SCHEMA_VIOLATION` (if you declared a `daily` type).
+
+---
+
 ## Meta
 
 ### `capabilities`
@@ -313,6 +365,9 @@ never guess.
 | `INVALID_TYPE` | bad memory type |
 | `INVALID_INPUT` | malformed argument (bad op, bad author, non-scalar var, …) |
 | `NOTE_NOT_FOUND` | unknown `note_id` |
+| `INVALID_NOTE_ID` | `note_id` that would leave the vault: empty, absolute, `\`/NUL, a drive letter, an empty/`.`/`..` segment, or under `.tacitus/` |
+| `SCHEMA_VIOLATION` | a write breaks the note's declared type (every problem listed in `reason`) |
+| `INVALID_TYPE_DEF` | a `.tacitus/types/*.yaml` file is malformed |
 | `CONFLICT` | create-over-existing, rename target exists, stale task guard |
 | `UNKNOWN_CHANGE` | `commit_changes` with an unknown/consumed `change_id` |
 | `UNKNOWN_VERSION` | `revert`/`get_version` with an unknown `version_id` |

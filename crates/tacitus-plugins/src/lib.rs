@@ -4,7 +4,7 @@
 //! a sandbox: a guest wasm module gets exactly one door back into the vault,
 //! the `tacitus.call(tool, args)` host function, which speaks the same
 //! `{ ok, data | error }` envelope as the MCP server. The tool surface is the
-//! shared registry in `tacitus_core::tools` — the same 25 tools the server
+//! shared registry in `tacitus_core::tools` — the same 27 tools the server
 //! publishes, one source of truth. Capability scoping is a tool allowlist
 //! declared in the plugin's `tacitus-plugin.toml`, checked at load (privilege)
 //! and at call time (allowlist). No WASI, no ambient filesystem: the import

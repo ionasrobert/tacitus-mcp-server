@@ -6,6 +6,8 @@ import { TacitusToolError } from './errors.js';
 import type {
   AuditEntry,
   Capabilities,
+  CaptureArgs,
+  CaptureResult,
   ChangeOp,
   CommitResult,
   CreateFromTemplateArgs,
@@ -32,13 +34,14 @@ import type {
   TemplateMeta,
   ToggleTaskArgs,
   VersionDetail,
+  TypeDefinition,
 } from './types.js';
 
 export interface SpawnOptions {
   /** Vault directory the server will serve. */
   vault: string;
   /**
-   * Server command. Default `tacitus-mcp` (the native binary, all 25 tools).
+   * Server command. Default `tacitus-mcp` (the native binary, all 27 tools).
    * For the npm server use `npx` with args `["-y", "@dashiro/tacitus-mcp-server"]`.
    */
   command?: string;
@@ -94,13 +97,13 @@ export class TacitusClient {
     try {
       result = await this.client.callTool({ name: tool, arguments: args });
     } catch (err) {
-      // The server rejects tools it doesn't serve (npm = core 16) at the
+      // An older server rejects tools it doesn't serve (npm < 0.2.0 had 16) at the
       // protocol level — surface that as a structured, actionable error.
       if (err instanceof Error && /not found|unknown tool|-32602/i.test(err.message)) {
         throw new TacitusToolError(
           'TOOL_UNAVAILABLE',
           `The connected server does not serve ${tool}.`,
-          'Native-first tools need the tacitus-mcp binary (GitHub Releases), not the npm server.',
+          'Update the server: every tool ships in the tacitus-mcp binary and in @dashiro/tacitus-mcp-server >= 0.2.0.',
         );
       }
       throw err;
@@ -125,7 +128,7 @@ export class TacitusClient {
         throw new TacitusToolError(
           'TOOL_UNAVAILABLE',
           `The connected server does not serve ${tool}.`,
-          'Native-first tools need the tacitus-mcp binary (GitHub Releases), not the npm server.',
+          'Update the server: every tool ships in the tacitus-mcp binary and in @dashiro/tacitus-mcp-server >= 0.2.0.',
         );
       }
       throw new TacitusToolError(
@@ -228,7 +231,7 @@ export class TacitusClient {
     return entries;
   }
 
-  // ---- properties / templates / tasks (native-first) ----
+  // ---- properties / templates / tasks ----
 
   async propertiesQuery(args: PropertiesQueryArgs = {}): Promise<PropertiesRow[]> {
     const { rows } = await this.call<{ rows: PropertiesRow[] }>('properties_query', { ...args });
@@ -265,6 +268,19 @@ export class TacitusClient {
 
   async getVersion(args: GetVersionArgs): Promise<VersionDetail> {
     return this.call<VersionDetail>('get_version', { ...args });
+  }
+
+  // ---- declared types / capture ----
+
+  /** Declared note types; writes to a typed note are validated against them. */
+  async listTypes(): Promise<TypeDefinition[]> {
+    const { types } = await this.call<{ types: TypeDefinition[] }>('list_types');
+    return types;
+  }
+
+  /** Append a line (or a `- [ ]` task) to a daily note, creating it if needed. */
+  async capture(args: CaptureArgs): Promise<CaptureResult> {
+    return this.call<CaptureResult>('capture', { ...args });
   }
 
   // ---- meta ----

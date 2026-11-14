@@ -443,7 +443,7 @@ fn dispatch_capabilities_reports_configured_identity() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 25, "all tools when unrestricted");
+    assert_eq!(names.len(), 27, "all tools when unrestricted");
     let mut sorted = names.clone();
     sorted.sort_unstable();
     assert_eq!(names, sorted, "sorted by name (matches rmcp list_all)");
@@ -452,7 +452,7 @@ fn dispatch_capabilities_reports_configured_identity() {
 #[test]
 fn descriptor_table_is_complete_and_classified() {
     let descriptors = ToolRegistry::descriptors();
-    assert_eq!(descriptors.len(), 25);
+    assert_eq!(descriptors.len(), 27);
     let writes: HashSet<&str> = descriptors
         .iter()
         .filter(|d| d.writes)
@@ -468,6 +468,7 @@ fn descriptor_table_is_complete_and_classified() {
         "link",
         "tag",
         "create_from_template",
+        "capture",
         "toggle_task",
         "rename_note",
         "delete_note",
@@ -517,4 +518,186 @@ fn with_writer_reflects_into_live_index_and_attributes_origin() {
         audit.contains("\"origin\":\"plugin:fixture\""),
         "origin attributed: {audit}"
     );
+}
+
+#[test]
+fn forget_refuses_ids_that_are_not_memory_ids() {
+    let root = temp_vault("forget-escape");
+    let vault = root.join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(root.join("victim.md"), "keep me\n").unwrap();
+    let reg = rw(&vault);
+    let env = reg.dispatch("forget", &json!({ "memory_id": "../../victim" }), None);
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["code"], "INVALID_INPUT");
+    assert!(root.join("victim.md").exists());
+}
+
+// ---- types + capture ----
+
+#[test]
+fn declared_types_gate_writes_and_list_types_describes_them() {
+    let vault = temp_vault("types");
+    fs::create_dir_all(vault.join(".tacitus/types")).unwrap();
+    fs::write(
+        vault.join(".tacitus/types/idea.yaml"),
+        "description: Article idea\nproperties:\n  status: { type: string, required: true, enum: [idea, draft] }\n  priority: { type: number }\n",
+    )
+    .unwrap();
+    let reg = rw(&vault);
+
+    let listed = reg.dispatch("list_types", &json!({}), None);
+    assert_eq!(listed["data"]["types"][0]["name"], "idea");
+    assert_eq!(
+        listed["data"]["types"][0]["properties"]["status"]["required"],
+        true
+    );
+    assert_eq!(
+        listed["data"]["types"][0]["properties"]["status"]["enum"],
+        json!(["idea", "draft"])
+    );
+
+    let bad = reg.dispatch(
+        "create_note",
+        &json!({ "note_id": "ideas/a", "content": "x", "frontmatter": { "type": "idea", "priority": "high" } }),
+        None,
+    );
+    assert_eq!(bad["error"]["code"], "SCHEMA_VIOLATION");
+    let reason = bad["error"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("missing required property \"status\""),
+        "{reason}"
+    );
+    assert!(reason.contains("\"priority\" must be number"), "{reason}");
+    assert!(!vault.join("ideas/a.md").exists(), "nothing written");
+
+    let good = reg.dispatch(
+        "create_note",
+        &json!({ "note_id": "ideas/a", "content": "x", "frontmatter": { "type": "idea", "status": "idea", "priority": 2 } }),
+        None,
+    );
+    assert_eq!(good["ok"], true, "{good}");
+    // An update that breaks the contract is refused too.
+    let broke = reg.dispatch(
+        "update_note",
+        &json!({ "note_id": "ideas/a", "frontmatter": { "type": "idea", "status": "shipped" } }),
+        None,
+    );
+    assert_eq!(broke["error"]["code"], "SCHEMA_VIOLATION");
+    // propose_changes surfaces it at dry-run time.
+    let dry = reg.dispatch(
+        "propose_changes",
+        &json!({ "ops": [{ "op": "create", "note_id": "ideas/b", "content": "x", "frontmatter": { "type": "idea" } }] }),
+        None,
+    );
+    assert_eq!(dry["error"]["code"], "SCHEMA_VIOLATION");
+
+    // A note that predates the declaration can still be tagged/linked (no
+    // NEW problem), but a write that adds a problem is refused.
+    fs::write(vault.join("legacy.md"), "---\ntype: idea\n---\nold\n").unwrap();
+    assert_eq!(
+        reg.dispatch("tag", &json!({ "note_id": "legacy", "tag": "x" }), None)["ok"],
+        true
+    );
+    let worse = reg.dispatch(
+        "update_note",
+        &json!({ "note_id": "legacy", "frontmatter": { "type": "idea", "priority": "high" } }),
+        None,
+    );
+    let reason = worse["error"]["reason"].as_str().unwrap();
+    assert!(reason.contains("\"priority\" must be number"), "{reason}");
+    assert!(
+        !reason.contains("status"),
+        "pre-existing problem not re-reported: {reason}"
+    );
+}
+
+#[test]
+fn capture_creates_then_appends_and_tasks_are_listed() {
+    let vault = temp_vault("capture");
+    let reg = rw(&vault);
+    let first = reg.dispatch(
+        "capture",
+        &json!({ "text": "idea:  link\nthe two notes", "date": "2026-11-14" }),
+        None,
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["data"]["note_id"], "daily/2026-11-14");
+    assert_eq!(first["data"]["created"], true);
+    let second = reg.dispatch(
+        "capture",
+        &json!({ "text": "call the bank due:2026-11-20", "task": true, "date": "2026-11-14" }),
+        None,
+    );
+    assert_eq!(second["data"]["created"], false);
+    assert_eq!(second["data"]["line"], "- [ ] call the bank due:2026-11-20");
+
+    let raw = fs::read_to_string(vault.join("daily/2026-11-14.md")).unwrap();
+    assert!(
+        raw.starts_with("---\ntype: daily\ndate: 2026-11-14\n---\n# 2026-11-14\n\n- "),
+        "{raw}"
+    );
+    assert!(
+        raw.contains(" idea: link the two notes\n- [ ] call the bank due:2026-11-20\n"),
+        "{raw}"
+    );
+
+    let tasks = reg.dispatch(
+        "list_tasks",
+        &json!({ "note_id": "daily/2026-11-14" }),
+        None,
+    );
+    assert_eq!(tasks["data"]["tasks"][0]["due"], "2026-11-20");
+    // Each capture is its own revertible version.
+    let v = second["data"]["version_id"].as_str().unwrap();
+    assert_eq!(
+        reg.dispatch("revert", &json!({ "version_id": v }), None)["ok"],
+        true
+    );
+    assert!(!fs::read_to_string(vault.join("daily/2026-11-14.md"))
+        .unwrap()
+        .contains("bank"));
+
+    for bad in [
+        json!({ "text": "  " }),
+        json!({ "text": "x", "date": "../../x" }),
+    ] {
+        assert_eq!(
+            reg.dispatch("capture", &bad, None)["error"]["code"],
+            "INVALID_INPUT"
+        );
+    }
+}
+
+#[test]
+fn capture_uses_the_daily_template_with_the_capture_date() {
+    let vault = temp_vault("capture-tpl");
+    fs::create_dir_all(vault.join(".tacitus/templates")).unwrap();
+    fs::write(
+        vault.join(".tacitus/templates/daily.md"),
+        "---\nkind: journal\nday: {{date}}\n---\n# Journal {{date}}\n\n## Log\n",
+    )
+    .unwrap();
+    let reg = rw(&vault);
+    let out = reg.dispatch(
+        "capture",
+        &json!({ "text": "x", "date": "2025-01-02" }),
+        None,
+    );
+    assert_eq!(out["ok"], true, "{out}");
+    let raw = fs::read_to_string(vault.join("daily/2025-01-02.md")).unwrap();
+    assert!(raw.contains("day: 2025-01-02"), "{raw}");
+    assert!(
+        raw.contains("# Journal 2025-01-02\n\n## Log\n\n- "),
+        "{raw}"
+    );
+}
+
+#[test]
+fn capture_is_denied_in_read_only_scope() {
+    let vault = temp_vault("capture-ro");
+    let reg = ToolRegistry::standard(&vault, PermissionScope::ReadOnly);
+    let out = reg.dispatch("capture", &json!({ "text": "x" }), None);
+    assert_eq!(out["error"]["code"], "PERMISSION_DENIED");
+    assert!(!vault.join("daily").exists());
 }
